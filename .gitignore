@@ -1,0 +1,26 @@
+# Environment & secrets
+.env
+.env.local
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Runtime data (personal state, credentials, cached content)
+data/credentials.json
+data/token.json
+data/article_cache.json
+data/seen_urls.json
+data/fetch_log.json
+data/email_actions.log
+data/processed_email_ids.json
+data/processed_slack_ts.json
+data/slack_last_check.json
+
+# macOS
+.DS_Store

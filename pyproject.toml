@@ -1,0 +1,13 @@
+[project]
+name = "mi"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx",
+    "pyyaml",
+    "python-dotenv",
+    "google-auth",
+    "google-auth-oauthlib",
+    "google-auth-httplib2",
+    "google-api-python-client",
+]

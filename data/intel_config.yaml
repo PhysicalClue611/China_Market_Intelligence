@@ -1,0 +1,15 @@
+companies:
+- en: TCL
+  zh: TCL
+- en: Haier Group
+  zh: 海尔集团
+- en: ANTA Sports
+  zh: 安踏集团
+- en: Li Ning
+  zh: 李宁集团
+- en: XCMG
+  zh: 徐工集团
+- en: BYD
+  zh: 比亚迪
+recipients:
+- you@example.com
