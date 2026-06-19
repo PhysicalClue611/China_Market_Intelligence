@@ -200,6 +200,52 @@ The same content is delivered as an HTML email and posted to the configured Slac
 | `http_utils.py` | httpx wrapper with retry (network errors / 5xx) |
 | `hermes_footer.py` | Report footer generation |
 
+## Deploying with Claude Code
+
+This repo ships a `CLAUDE.md` that gives Claude Code deep context about the project architecture, environment variables, known pitfalls, and script interactions. If you have [Claude Code](https://claude.ai/code) installed, you can use it as a deployment co-pilot rather than reading everything manually.
+
+**Install Claude Code:**
+
+```bash
+npm install -g @anthropic-ai/claude-code
+```
+
+**Start a session in the project directory:**
+
+```bash
+cd China_Market_Intelligence
+claude
+```
+
+Claude Code will automatically read `CLAUDE.md` on startup. From there you can ask it to walk you through any part of the setup. Some useful opening prompts:
+
+```
+Read CLAUDE.md, then help me fill in .env for a minimal run (email output only, no Slack).
+```
+
+```
+Read CLAUDE.md. I have Resend and DeepSeek keys but no Stalwart server — 
+what parts of the pipeline still work and what do I need to skip or stub?
+```
+
+```
+Read CLAUDE.md and README. I want to add a new company to the watchlist 
+and do a one-off run just for that company.
+```
+
+```
+Read CLAUDE.md. Set up launchd scheduling for weekly Sunday runs 
+and 5-minute email/Slack polling on my Mac.
+```
+
+Claude Code can read your local files, run commands, and edit configs — so it can also verify your `.env` is complete, run `uv sync`, do a dry-run smoke test, and debug any errors that come back, all in the same session.
+
+**What Claude Code cannot do for you:**
+
+- Provision external services (Resend account, DeepSeek API key, Stalwart server) — those require manual sign-up
+- Access your Obsidian vault unless it is on the local filesystem
+- Run the pipeline on a schedule by itself — that requires launchd or cron on your machine
+
 ## Contributing
 
 Bug reports and feature requests go through [GitHub Issues](https://github.com/PhysicalClue611/China_Market_Intelligence/issues). Please open an issue before submitting a pull request.
