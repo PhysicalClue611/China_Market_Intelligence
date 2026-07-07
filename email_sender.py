@@ -75,6 +75,10 @@ def send_report(
         mid = reply_to_msg_id if reply_to_msg_id.startswith("<") else f"<{reply_to_msg_id}>"
         payload["headers"] = {"In-Reply-To": mid, "References": mid}
 
+    if not FROM_ADDRESS:
+        logger.error("FROM_ADDRESS not set, skipping email (would send invalid 'from' header)")
+        return None
+
     try:
         resp = httpx.post(
             "https://api.resend.com/emails",
@@ -86,6 +90,12 @@ def send_report(
         email_id = resp.json().get("id")
         logger.info(f"Email sent via Resend → {to_list} (id={email_id})")
         return [email_id] if email_id else None
+    except httpx.HTTPStatusError as e:
+        logger.error(
+            f"Resend send failed: {e.response.status_code} {e.response.reason_phrase} "
+            f"body={e.response.text}"
+        )
+        return None
     except Exception as e:
         logger.error(f"Resend send failed: {type(e).__name__}: {e}")
         return None
