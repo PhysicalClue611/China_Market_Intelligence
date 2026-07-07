@@ -246,6 +246,9 @@ Bot token 格式 `{bot_user_id}:{secret}`，冒号前是 bot 自身 Telegram use
 ### 18. OpenRouter NovitaAI 对结构化提取质量极差（2026-06-01 实测）
 同一 model id 在不同 provider 上运行精度不同。NovitaAI 激进量化（Q3/Q4），结构化提取时实体长度超限、规则遵从性差、`described_as` 滥用、对称重复。`kg_extractor.py` 的 `OR_PROVIDER` 已设为 `["DigitalOcean", "DeepSeek", "Together", "Fireworks"]`。DigitalOcean（FP16/BF16）质量与精度相当于 R1/NovitaAI，速度快 10 倍，成本低一个数量级。**所有结构化提取任务均不得用 NovitaAI。**
 
+### 19. `.env` 缺失 `FROM_ADDRESS` 导致 Resend 邮件静默 422（已修复 2026-07-06，issue #1）
+`email_sender.py` 用 `os.getenv("FROM_ADDRESS", "")` 取值，`.env` 中若整行缺失（非置空）不会报错，拼出 `from: "Hermes MI <>"` 无效 header，Resend 返回 422。Telegram/Slack 通知仍会成功，掩盖邮件通道故障，仅在日志里留一行不含响应体的 ERROR，难以定位。**修复**：`.env` 补齐 `FROM_ADDRESS=MI@physicalclue.us`；`email_sender.py` 新增前置守卫（`FROM_ADDRESS` 为空直接拒绝发送 + ERROR 日志）+ `httpx.HTTPStatusError` 单独捕获并记录完整响应体。**教训**：新环境变量上线后（尤其是迁移场景，如本例 2026-05-07 Gmail→Resend 迁移），必须实际核实 `.env` 中确有其值，不能只看 `.env.example` 或代码默认值；第三方 API 调用的异常处理必须包含响应体，否则日志无法支撑事后排查。
+
 ---
 
 ## 去重架构
