@@ -22,5 +22,8 @@ data/processed_email_ids.json
 data/processed_slack_ts.json
 data/slack_last_check.json
 
+# Runtime logs
+logs/
+
 # macOS
 .DS_Store

@@ -198,8 +198,10 @@ def run_slack_check() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
-    run_slack_check()
+    from log_utils import setup_logging
+    setup_logging("slack-check", fmt="%(asctime)s %(levelname)s %(name)s %(message)s")
+    try:
+        run_slack_check()
+    except Exception:
+        logger.exception("run_slack_check crashed")
+        raise

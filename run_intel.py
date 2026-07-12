@@ -707,6 +707,11 @@ if __name__ == "__main__":
     parser.add_argument("--recipients", default=None,
                         help="Override recipient list (comma-separated emails)")
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    from log_utils import setup_logging
+    setup_logging("intel")
     override = [r.strip() for r in args.recipients.split(",")] if args.recipients else None
-    run_intel(force=args.force, recipients=override)
+    try:
+        run_intel(force=args.force, recipients=override)
+    except Exception:
+        logger.exception("run_intel crashed")
+        raise

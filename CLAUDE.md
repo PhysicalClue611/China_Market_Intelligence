@@ -55,11 +55,13 @@
 
 ## 调度（宿主机 launchd）
 
-| plist | 周期 | 脚本 | 日志 |
-|---|---|---|---|
-| `com.hermes.intel` | 周日 08:59 PDT | `~/MI/run_intel.py` | `/tmp/hermes_intel.log` |
-| `com.hermes.emailcheck` | 每 5 分钟 | `~/MI/email_check.py` | `/tmp/hermes_emailcheck.log` |
-| `com.hermes.mi-slack-check` | 每 5 分钟 | `~/MI/slack_check.py` | `/tmp/hermes_slack_check.log` |
+| plist | 周期 | 脚本 | 日志（Python logging，30天滚动） | launchd 原始 stdout/stderr（异常兜底） |
+|---|---|---|---|---|
+| `com.hermes.intel` | 周日 08:59 PDT | `~/MI/run_intel.py` | `~/MI/logs/intel.log` | `~/MI/logs/intel-launchd.log` |
+| `com.hermes.emailcheck` | 每 5 分钟 | `~/MI/email_check.py` | `~/MI/logs/emailcheck.log` | `~/MI/logs/emailcheck-launchd.log` |
+| `com.hermes.mi-slack-check` | 每 5 分钟 | `~/MI/slack_check.py` | `~/MI/logs/slack-check.log` | `~/MI/logs/slack-check-launchd.log` |
+
+日志已从 `/tmp` 迁移到项目自身目录 `~/MI/logs/`（2026-07-11，见 issue #1 [Comment] / #2）：`/tmp` 下超过 3 天未访问的文件会被 macOS 每日 `periodic` 清理任务删除，导致周执行任务的日志"看似不存在"、巡检误报。新方案由 `log_utils.py` 的 `setup_logging()` 提供 `TimedRotatingFileHandler`（`backupCount=30`），三个脚本的 `if __name__ == "__main__":` 均已改为调用它；plist 的 `StandardOutPath`/`StandardErrorPath` 只作为 import 期崩溃等无法走 Python logging 的场景的兜底，正常运行不会写入。
 
 launchd 直接调 `~/MI/.venv/bin/python`，无 Docker，无 LLM 介入。
 `com.hermes.mempalace-bridge` 常驻运行（port 8765），为脚本提供 MemPalace/Obsidian API。
@@ -83,6 +85,9 @@ launchd 直接调 `~/MI/.venv/bin/python`，无 Docker，无 LLM 介入。
 | `TELEGRAM_BOT_TOKEN` | 推送通知 |
 | `RESEND_API_KEY` | 邮件发送（Resend API，`re_...`） |
 | `STALWART_API_KEY` | 邮件收信 JMAP 认证（`API_...`） |
+| `JMAP_BASE` | Stalwart JMAP 服务器地址（`https://oci.physicalclue.us:8443`） |
+| `JMAP_ACCOUNT_ID` | JMAP 账号 ID（`c`，见踩坑 #20） |
+| `JMAP_INBOX_ID` | INBOX mailbox ID（`a`，见踩坑 #20） |
 | `HERMES_DATA` | `~/MI/data`（脚本数据目录） |
 | `OBSIDIAN_PATH` | Obsidian vault 绝对路径 |
 | `SLACK_BOT_TOKEN` | Slack Bot Token（与 Hermes 共用，`xoxb-...`） |
@@ -248,6 +253,9 @@ Bot token 格式 `{bot_user_id}:{secret}`，冒号前是 bot 自身 Telegram use
 
 ### 19. `.env` 缺失 `FROM_ADDRESS` 导致 Resend 邮件静默 422（已修复 2026-07-06，issue #1）
 `email_sender.py` 用 `os.getenv("FROM_ADDRESS", "")` 取值，`.env` 中若整行缺失（非置空）不会报错，拼出 `from: "Hermes MI <>"` 无效 header，Resend 返回 422。Telegram/Slack 通知仍会成功，掩盖邮件通道故障，仅在日志里留一行不含响应体的 ERROR，难以定位。**修复**：`.env` 补齐 `FROM_ADDRESS=MI@physicalclue.us`；`email_sender.py` 新增前置守卫（`FROM_ADDRESS` 为空直接拒绝发送 + ERROR 日志）+ `httpx.HTTPStatusError` 单独捕获并记录完整响应体。**教训**：新环境变量上线后（尤其是迁移场景，如本例 2026-05-07 Gmail→Resend 迁移），必须实际核实 `.env` 中确有其值，不能只看 `.env.example` 或代码默认值；第三方 API 调用的异常处理必须包含响应体，否则日志无法支撑事后排查。
+
+### 20. `.env` 缺失 `JMAP_BASE`/`JMAP_ACCOUNT_ID`/`JMAP_INBOX_ID` 导致 email_check.py 静默故障 3 周以上（已修复 2026-07-11，issue #2）
+`email_check.py` 用 `os.getenv("JMAP_BASE", "")` 兜底空字符串，拼出 `/jmap/` 无效 URL，每次调用报 `Request URL is missing an 'http://' or 'https://' protocol.`。异常被 catch 后只记 ERROR、进程正常退出（exit 0），launchd 判定"成功"，巡检脚本看不出异常——收信指令通道（加公司/加收件人/邮件触发 run_intel）静默失效至少从 2026-06-17 到 2026-07-11（`processed_email_ids.json` 期间无新写入）。**排查确认**：三个变量不是被 git 误删——`.env` 本就在 `.gitignore` 里、从未进过版本历史，纯粹是本地从未配全。`JMAP_BASE` 从 Obsidian 迁移文档（`Hermes/MI/邮件系统迁移说明.md`，Paperview 仓库 2026-06-29 提交）找回；`JMAP_ACCOUNT_ID`/`JMAP_INBOX_ID` 通过对生产 Stalwart 服务器发起只读 JMAP `session`/`Mailbox/get` 查询独立确认得到真实值 `c`/`a`，与文档记录吻合。**修复**：`.env` 补齐三个变量，端到端发送真实邮件验证收信链路打通。**教训**：捕获异常后只记 ERROR 不报警的静默降级，对每 5 分钟跑一次的高频任务是最危险的模式——launchd exit code 和巡检都看不出来，只能靠"功能是否真的在工作"这类主动验证发现；关键环境变量应在脚本启动时做存在性校验，缺失时 fail-fast，而不是构造出无效值继续空转。
 
 ---
 

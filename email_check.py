@@ -584,5 +584,10 @@ def run_email_check():
     _background_threads.clear()
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    run_email_check()
+    from log_utils import setup_logging
+    setup_logging("emailcheck")
+    try:
+        run_email_check()
+    except Exception:
+        logger.exception("run_email_check crashed")
+        raise
