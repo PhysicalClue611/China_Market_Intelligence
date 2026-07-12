@@ -142,9 +142,11 @@ launchd 直接调 `~/MI/.venv/bin/python`，无 Docker，无 LLM 介入。
 |---|---|
 | 情报主合成 | `deepseek-v4-pro` + `reasoning_effort=high`（DeepSeek 直连） |
 | Prefilter 门控 | `deepseek-v4-flash`（DeepSeek 直连） |
-| 邮件指令解析 / 英文名推断 | `openai/gpt-oss-20b` |
+| 邮件指令解析 / 英文名推断 | `openai/gpt-oss-20b`（OpenRouter） |
 | 情报主搜索 | Tavily `topic=general, days=8` → SerpApi → Serper |
 | 中文新闻补充 | Serper News (`/news, hl=zh-cn`) → SerpApi News (`tbm=nws`) |
+
+**OpenRouter 调用归属**（2026-07-12）：所有 `openrouter.ai/api/v1/chat/completions` 调用统一附加 `OR_ATTRIBUTION_HEADERS`（`HTTP-Referer: PhysicalClue611`、`X-OpenRouter-Title: MI`），定义在各文件 `OPENROUTER_API_KEY` 常量旁，调用点用 `**OR_ATTRIBUTION_HEADERS` 合并进 headers，不手写字面量。调用点：`email_check.py`（3 处）、`run_intel_deepseek_test.py`（1 处）。全局约定见 `~/.claude/CLAUDE.md` "OpenRouter API 归属 Header 约定"；新增 OpenRouter 调用点时同样遵循。
 
 ---
 
