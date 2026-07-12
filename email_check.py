@@ -26,6 +26,27 @@ _background_threads: list = []
 JMAP_BASE = os.getenv("JMAP_BASE", "")
 JMAP_ACCOUNT_ID = os.getenv("JMAP_ACCOUNT_ID", "")
 JMAP_INBOX_ID = os.getenv("JMAP_INBOX_ID", "")
+STALWART_API_KEY = os.getenv("STALWART_API_KEY", "")
+
+_REQUIRED_JMAP_VARS = {
+    "JMAP_BASE": JMAP_BASE,
+    "JMAP_ACCOUNT_ID": JMAP_ACCOUNT_ID,
+    "JMAP_INBOX_ID": JMAP_INBOX_ID,
+    "STALWART_API_KEY": STALWART_API_KEY,
+}
+
+
+class JMAPConfigError(RuntimeError):
+    """必需的 JMAP 配置缺失，属于部署错误，不应被当作普通轮询失败吞掉。"""
+
+
+def _validate_jmap_config():
+    """启动时校验必需 JMAP 变量非空，缺失则直接抛出（fail fast），日志只报变量名不报值。"""
+    missing = [name for name, value in _REQUIRED_JMAP_VARS.items() if not value]
+    if missing:
+        raise JMAPConfigError(
+            f"Missing required JMAP config: {', '.join(missing)} — check .env"
+        )
 
 DATA_DIR = Path(os.getenv("HERMES_DATA", "/opt/data"))
 LOG_PATH = DATA_DIR / "email_actions.log"
@@ -116,10 +137,9 @@ SYSTEM_PROMPT = (
 # ── JMAP helpers ─────────────────────────────────────────────────────────────
 
 def _jmap_request(method_calls: list) -> list:
-    api_key = os.getenv("STALWART_API_KEY", "")
     resp = httpx.post(
         f"{JMAP_BASE}/jmap/",
-        headers={"Authorization": f"Bearer {api_key}"},
+        headers={"Authorization": f"Bearer {STALWART_API_KEY}"},
         json={
             "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
             "methodCalls": method_calls,
@@ -497,6 +517,7 @@ def _write_log(uid: str, action: str, targets: list, result: str):
 
 def run_email_check(backfill_hours: int | None = None):
     logger.info("Checking MI mailbox for commands...")
+    _validate_jmap_config()  # 缺失关键配置直接抛出，不落入下面 fetch 的 try/except 被静默吞掉
     authorized = set(config_store.get_recipients())
     processed_ids = _load_processed_ids()
 
