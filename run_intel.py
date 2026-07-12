@@ -244,10 +244,15 @@ def _jina_extract(url: str) -> str:
 
 # ── Search + fetch ────────────────────────────────────────────────────────────
 
-def fetch_company_raw(company: dict) -> list[dict] | None:
-    """Bilingual + CN-news parallel search, then relevance/freshness filters."""
+def fetch_company_raw(company: dict) -> tuple[list[dict], dict] | tuple[None, dict]:
+    """Bilingual + CN-news parallel search, then relevance/freshness filters.
+
+    Returns (articles_or_None, funnel) where funnel tracks survivor counts at
+    each filter stage for diagnosing why weekly output has been shrinking.
+    """
     zh = company["zh"]
     en = company["en"]
+    funnel = {"company": zh}
 
     # Primary bilingual search (Tavily days=8 → SerpApi → Serper fallback)
     if en:
@@ -258,7 +263,8 @@ def fetch_company_raw(company: dict) -> list[dict] | None:
         results = search_news(query, days=SEARCH_DAYS, max_results=8)
     except Exception as e:
         logger.warning(f"Search failed [{query}]: {e}")
-        return None
+        funnel["error"] = "search_failed"
+        return None, funnel
 
     # Supplemental Chinese news search (Serper News → SerpApi News, non-fatal)
     cn_query = f"{zh} {en} 最新 新闻 战略 财报" if en else f"{zh} 最新 新闻 战略"
@@ -274,6 +280,8 @@ def fetch_company_raw(company: dict) -> list[dict] | None:
         if added:
             logger.info(f"[{zh}] CN news supplement: +{added} articles")
 
+    funnel["raw"] = len(results)
+
     # Method B: published_date filter — drop if parseable date is > PUB_DATE_MAX_AGE days ago
     cutoff_dt = datetime.now() - timedelta(days=PUB_DATE_MAX_AGE)
     fresh_by_date = []
@@ -288,6 +296,7 @@ def fetch_company_raw(company: dict) -> list[dict] | None:
     if date_dropped:
         logger.info(f"[{zh}] Date filter: {len(results)} → {len(fresh_by_date)} ({date_dropped} dropped)")
     results = fresh_by_date
+    funnel["after_date"] = len(results)
 
     # Relevance filter: Chinese prefix or English first word must appear
     zh_kw = zh[:2]
@@ -299,6 +308,7 @@ def fetch_company_raw(company: dict) -> list[dict] | None:
     ]
     if len(relevant) < len(results):
         logger.info(f"[{zh}] Relevance filter: {len(results)} → {len(relevant)} results")
+    funnel["after_relevance"] = len(relevant)
 
     # Year staleness filter: titles containing only years ≥2 behind current year
     fresh = [r for r in relevant if not _is_stale(r["title"])]
@@ -306,6 +316,7 @@ def fetch_company_raw(company: dict) -> list[dict] | None:
         stale_titles = [r["title"] for r in relevant if _is_stale(r["title"])]
         logger.info(f"[{zh}] Staleness filter: removed {len(relevant) - len(fresh)} old docs: {stale_titles}")
         relevant = fresh
+    funnel["after_staleness"] = len(relevant)
 
     # Jina enrichment: replace short Tavily snippets with full article text.
     # Only targets articles without published_date (English Tavily results);
@@ -334,7 +345,7 @@ def fetch_company_raw(company: dict) -> list[dict] | None:
         limit = JINA_LLM_CHARS if r.get("jina_enriched") else 500
         r["content"] = r["content"][:limit]
 
-    return relevant
+    return relevant, funnel
 
 
 # ── Prefilter (V4 Flash) ──────────────────────────────────────────────────────
@@ -549,15 +560,17 @@ def run_intel(recipients: list[str] | None = None, force: bool = False):
         # Snapshot historical cache BEFORE fetch to avoid same-batch mutual L2 drops
         historical_cache = get_articles_by_company(zh) if not force else []
         logger.info(f"[{zh}] Fetching news...")
-        raw_results = fetch_company_raw(company)
+        raw_results, funnel = fetch_company_raw(company)
         if raw_results is None:
             logger.warning(f"[{zh}] Search provider failed, skipping (will retry next run)")
+            logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
             continue
 
         if not force:
             new_results = [r for r in raw_results if r["url"] not in seen_urls]
         else:
             new_results = raw_results
+        funnel["after_l1"] = len(new_results)
 
         # L2: title Jaccard similarity — catches same story at a different URL
         if not force and new_results:
@@ -574,16 +587,20 @@ def run_intel(recipients: list[str] | None = None, force: bool = False):
                 logger.info(f"[{zh}] L2 title dedup: {len(new_results)} → {len(l2_kept)} "
                             f"({l2_skipped} removed)")
             new_results = l2_kept
+        funnel["after_l2"] = len(new_results)
 
         if not new_results:
             logger.info(f"[{zh}] No new URLs after dedup, skipping section")
+            logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
             fetch_log[zh] = date_str
             continue
 
         # Prefilter: V4 Flash quality + cross-week dedup gate
         new_results, length_hint = prefilter_articles(zh, new_results, last_week_section)
+        funnel["after_prefilter"] = len(new_results)
         if not new_results:
             logger.info(f"[{zh}] Prefilter: no actionable intel, skipping section")
+            logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
             fetch_log[zh] = date_str
             continue
 
@@ -611,6 +628,7 @@ def run_intel(recipients: list[str] | None = None, force: bool = False):
         )
         if summary is None:
             logger.warning(f"[{zh}] LLM synthesis failed after retries, skipping section")
+            logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
             continue
 
         in_t = usage.get("prompt_tokens", 0)
@@ -618,6 +636,7 @@ def run_intel(recipients: list[str] | None = None, force: bool = False):
         total_input += in_t
         total_output += out_t
         logger.info(f"[{zh}] tokens: in={in_t} out={out_t}")
+        logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
         sections.append(f"## {zh}\n\n{summary}\n\n---")
 
         if not force:

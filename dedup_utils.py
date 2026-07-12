@@ -62,7 +62,7 @@ def find_cache_duplicate(
     new_url: str,
     new_title: str,
     cached_articles: list[dict],
-    threshold: float = 0.45,
+    threshold: float = 0.65,
 ) -> tuple[bool, float, str]:
     """
     Compare new_title against all cached articles for the same company.
