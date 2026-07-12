@@ -30,6 +30,8 @@ JMAP_INBOX_ID = os.getenv("JMAP_INBOX_ID", "")
 DATA_DIR = Path(os.getenv("HERMES_DATA", "/opt/data"))
 LOG_PATH = DATA_DIR / "email_actions.log"
 PROCESSED_IDS_PATH = DATA_DIR / "processed_email_ids.json"
+CURSOR_PATH = DATA_DIR / "jmap_cursor.json"
+CURSOR_OVERLAP_MINUTES = 10  # 重叠窗口，防止游标边界的时钟误差漏信；重复邮件靠 processed_ids 去重
 
 
 def _send_telegram_alert(text: str):
@@ -78,6 +80,26 @@ def _save_processed_id(msg_id):
     data[msg_id] = datetime.now().timestamp()
     PROCESSED_IDS_PATH.write_text(json.dumps(data))
 
+
+def _load_cursor(default_hours: int = 24) -> str:
+    """加载上次成功轮询的游标（最新 receivedAt）。缺失/损坏时退化为过去 default_hours 小时。"""
+    if CURSOR_PATH.exists():
+        try:
+            data = json.loads(CURSOR_PATH.read_text())
+            ts = data.get("last_received_at")
+            if ts:
+                return ts
+        except Exception as e:
+            logger.warning(f"Cursor read failed, falling back to {default_hours}h window: {e}")
+    return (datetime.now(timezone.utc) - timedelta(hours=default_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _save_cursor(ts: str):
+    """原子写入游标：写临时文件再 os.replace，避免中途崩溃截断文件。"""
+    tmp = CURSOR_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"last_received_at": ts}))
+    os.replace(tmp, CURSOR_PATH)
+
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/chat/completions"
@@ -108,24 +130,33 @@ def _jmap_request(method_calls: list) -> list:
     return resp.json()["methodResponses"]
 
 
-def _jmap_fetch_inbox(hours: int = 24) -> list[dict]:
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    responses = _jmap_request([
-        ["Email/query", {
-            "accountId": JMAP_ACCOUNT_ID,
-            "filter": {"inMailbox": JMAP_INBOX_ID, "after": cutoff},
-            "sort": [{"property": "receivedAt", "isAscending": False}],
-            "limit": 50,
-        }, "q0"],
-        ["Email/get", {
-            "accountId": JMAP_ACCOUNT_ID,
-            "#ids": {"resultOf": "q0", "name": "Email/query", "path": "/ids"},
-            "properties": ["subject", "from", "messageId", "receivedAt", "textBody", "bodyValues"],
-            "fetchTextBodyValues": True,
-            "maxBodyValueBytes": 50000,
-        }, "g0"],
-    ])
-    return responses[1][1].get("list", [])
+def _jmap_fetch_inbox(after: str, limit: int = 50) -> list[dict]:
+    """拉取 after 之后的全部邮件，按 receivedAt 升序分页直到取尽（不再受单次 50 条上限截断）。"""
+    all_emails: list[dict] = []
+    position = 0
+    while True:
+        responses = _jmap_request([
+            ["Email/query", {
+                "accountId": JMAP_ACCOUNT_ID,
+                "filter": {"inMailbox": JMAP_INBOX_ID, "after": after},
+                "sort": [{"property": "receivedAt", "isAscending": True}],
+                "position": position,
+                "limit": limit,
+            }, "q0"],
+            ["Email/get", {
+                "accountId": JMAP_ACCOUNT_ID,
+                "#ids": {"resultOf": "q0", "name": "Email/query", "path": "/ids"},
+                "properties": ["subject", "from", "messageId", "receivedAt", "textBody", "bodyValues"],
+                "fetchTextBodyValues": True,
+                "maxBodyValueBytes": 50000,
+            }, "g0"],
+        ])
+        batch = responses[1][1].get("list", [])
+        all_emails.extend(batch)
+        if len(batch) < limit:
+            break
+        position += limit
+    return all_emails
 
 
 def _jmap_body(email: dict) -> str:
@@ -464,20 +495,37 @@ def _write_log(uid: str, action: str, targets: list, result: str):
 
 # ── Main polling function ─────────────────────────────────────────────────────
 
-def run_email_check():
+def run_email_check(backfill_hours: int | None = None):
     logger.info("Checking MI mailbox for commands...")
     authorized = set(config_store.get_recipients())
     processed_ids = _load_processed_ids()
 
+    if backfill_hours is not None:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=backfill_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        logger.info(f"Backfill mode: scanning last {backfill_hours}h (after={cutoff})")
+    else:
+        cursor = _load_cursor()
+        cursor_dt = datetime.fromisoformat(cursor.replace("Z", "+00:00")) - timedelta(minutes=CURSOR_OVERLAP_MINUTES)
+        cutoff = cursor_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
     try:
-        emails = _jmap_fetch_inbox(hours=24)
+        emails = _jmap_fetch_inbox(after=cutoff)
     except Exception as e:
         logger.error(f"JMAP fetch failed: {e}")
         return
 
+    def _advance_cursor(email: dict):
+        received = email.get("receivedAt")
+        if received:
+            _save_cursor(received)
+
     new_emails = [e for e in emails if e["id"] not in processed_ids]
     if not new_emails:
         logger.info("No new command emails.")
+        if emails:
+            # 全部是重叠窗口内已处理过的旧邮件，仍需把游标推进到本批最新时间，
+            # 否则窗口会永远卡在旧游标处，每次重复重新拉取整批。
+            _advance_cursor(emails[-1])
         return
 
     logger.info(f"Found {len(new_emails)} unprocessed command email(s).")
@@ -500,6 +548,7 @@ def run_email_check():
         if sender_email not in {r.lower() for r in authorized}:
             logger.info(f"Ignored email from unauthorized sender: {sender}")
             _save_processed_id(email_id)
+            _advance_cursor(email)
             continue
 
         body = _jmap_body(email)
@@ -576,6 +625,7 @@ def run_email_check():
             _send_telegram_alert(f"[Hermes] 邮件指令 ✓\n指令：{desc}\nID：{new_uid}")
 
         _save_processed_id(email_id)
+        _advance_cursor(email)
         logger.info(f"Done: {new_uid}")
 
     # Wait for any background tasks (run_intel / add_recipient) before process exits.
@@ -586,8 +636,15 @@ def run_email_check():
 if __name__ == "__main__":
     from log_utils import setup_logging
     setup_logging("emailcheck")
+    import argparse
+    parser = argparse.ArgumentParser(description="MI 邮件指令轮询")
+    parser.add_argument(
+        "--backfill-hours", type=int, default=None,
+        help="灾后补抓：忽略持久化游标，扫描最近 N 小时（有界范围，成功后仍会推进游标）",
+    )
+    args = parser.parse_args()
     try:
-        run_email_check()
+        run_email_check(backfill_hours=args.backfill_hours)
     except Exception:
         logger.exception("run_email_check crashed")
         raise
