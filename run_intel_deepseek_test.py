@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OR_ATTRIBUTION_HEADERS = {
+    "HTTP-Referer": "PhysicalClue611",
+    "X-OpenRouter-Title": "MI",
+}
 SGT = timezone(timedelta(hours=8))
 
 LLM_MODEL = "deepseek/deepseek-v4-flash"
@@ -106,6 +110,7 @@ def synthesize(company_zh: str, articles: list[dict]) -> str:
         headers={
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
             "Content-Type": "application/json",
+            **OR_ATTRIBUTION_HEADERS,
         },
         json={
             "model": LLM_MODEL,

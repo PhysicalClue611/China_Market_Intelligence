@@ -122,6 +122,10 @@ def _save_cursor(ts: str):
     os.replace(tmp, CURSOR_PATH)
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OR_ATTRIBUTION_HEADERS = {
+    "HTTP-Referer": "PhysicalClue611",
+    "X-OpenRouter-Title": "MI",
+}
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/chat/completions"
 LLM_MODEL = "openai/gpt-oss-20b"
@@ -215,7 +219,7 @@ def _parse_command(email_text: str) -> dict:
     try:
         data, err = post_with_retry(
             "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", **OR_ATTRIBUTION_HEADERS},
             json_body={
                 "model": LLM_MODEL,
                 "messages": [
@@ -281,7 +285,7 @@ def _followup_three_stage(question: str) -> str:
     try:
         r1_data, r1_err = post_with_retry(
             "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", **OR_ATTRIBUTION_HEADERS},
             json_body={
                 "model": LLM_MODEL,
                 "messages": [{"role": "user", "content": stage1_prompt}],
@@ -363,7 +367,7 @@ def _lookup_english_name(zh_name: str) -> str:
     try:
         data, err = post_with_retry(
             "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", **OR_ATTRIBUTION_HEADERS},
             json_body={
                 "model": LLM_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
