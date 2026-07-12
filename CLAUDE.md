@@ -48,6 +48,7 @@
     ├── seen_urls.json
     ├── fetch_log.json
     ├── processed_email_ids.json
+    ├── jmap_cursor.json  # JMAP 轮询游标（最新 receivedAt），见踩坑 #21
     └── intel_config.yaml # 公司列表 fallback（主配置在 Obsidian watchlist.md）
 ```
 
@@ -256,6 +257,9 @@ Bot token 格式 `{bot_user_id}:{secret}`，冒号前是 bot 自身 Telegram use
 
 ### 20. `.env` 缺失 `JMAP_BASE`/`JMAP_ACCOUNT_ID`/`JMAP_INBOX_ID` 导致 email_check.py 静默故障 3 周以上（已修复 2026-07-11，issue #2）
 `email_check.py` 用 `os.getenv("JMAP_BASE", "")` 兜底空字符串，拼出 `/jmap/` 无效 URL，每次调用报 `Request URL is missing an 'http://' or 'https://' protocol.`。异常被 catch 后只记 ERROR、进程正常退出（exit 0），launchd 判定"成功"，巡检脚本看不出异常——收信指令通道（加公司/加收件人/邮件触发 run_intel）静默失效至少从 2026-06-17 到 2026-07-11（`processed_email_ids.json` 期间无新写入）。**排查确认**：三个变量不是被 git 误删——`.env` 本就在 `.gitignore` 里、从未进过版本历史，纯粹是本地从未配全。`JMAP_BASE` 从 Obsidian 迁移文档（`Hermes/MI/邮件系统迁移说明.md`，Paperview 仓库 2026-06-29 提交）找回；`JMAP_ACCOUNT_ID`/`JMAP_INBOX_ID` 通过对生产 Stalwart 服务器发起只读 JMAP `session`/`Mailbox/get` 查询独立确认得到真实值 `c`/`a`，与文档记录吻合。**修复**：`.env` 补齐三个变量，端到端发送真实邮件验证收信链路打通。**教训**：捕获异常后只记 ERROR 不报警的静默降级，对每 5 分钟跑一次的高频任务是最危险的模式——launchd exit code 和巡检都看不出来，只能靠"功能是否真的在工作"这类主动验证发现；关键环境变量应在脚本启动时做存在性校验，缺失时 fail-fast，而不是构造出无效值继续空转。
+
+### 21. JMAP 24 小时滑动窗口导致长时间中断后指令永久丢失（已修复 2026-07-12，issue #5）
+`_jmap_fetch_inbox` 原实现每次只拉取"过去 24 小时"内的邮件，无游标、无补抓机制。若轮询本身中断超过 24 小时（如踩坑 #20 那次 3 周静默故障），恢复后早于滑动截止线的指令邮件对查询而言直接消失，`processed_email_ids.json` 只记录见过的 ID，无法枚举"从未见过"的历史邮件。**修复**：`email_check.py` 改为持久化游标（`data/jmap_cursor.json`，原子写入 tmp+`os.replace`），记录最新处理邮件的 `receivedAt`，每处理完一封（含未授权发件人跳过的情况）立即推进；读取时回退 10 分钟重叠窗口防时钟误差漏信，重复邮件靠既有 `processed_ids` 吸收；`_jmap_fetch_inbox` 改用升序 + `position` 分页取尽，不再受单次 50 条上限截断；新增 `--backfill-hours` CLI 参数，可在灾后手动指定有界范围补抓，成功后仍推进游标。首次部署时无游标文件，自动退化为原 24 小时窗口，行为不变。**教训**：滑动时间窗口类轮询若无持久游标，本质上是"只能容忍短暂中断"的设计，一旦中断时长超过窗口，故障期内的数据是真正丢失而非延迟——这类系统应默认假设中断可能超过窗口，游标持久化是标配而非可选加固。
 
 ---
 
