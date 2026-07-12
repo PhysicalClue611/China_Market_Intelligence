@@ -40,6 +40,8 @@ SLACK_BOT_USER_ID = "U0B4ETW2SCE"
 
 MI_PREFIX = "mi:"  # explicit prefix for standalone MI queries
 PROCESSED_TS_TTL = 72 * 3600  # seconds before processed-ts entries expire
+CURSOR_OVERLAP_SECONDS = 600  # 重叠窗口，防止游标边界的时钟误差漏信；重复消息靠 processed_ts 去重
+MAX_HISTORY_PAGES = 50  # 分页安全阀，防止 Slack API 异常导致无限循环
 
 
 # ── Processed-ts tracking ────────────────────────────────────────────────────
@@ -100,14 +102,24 @@ def _slack_get(endpoint: str, params: dict) -> dict:
     return resp.json()
 
 
-def _get_channel_history(channel: str, oldest_ts: str) -> list:
-    data = _slack_get(
-        "conversations.history",
-        {"channel": channel, "oldest": oldest_ts, "limit": 100},
-    )
-    if not data.get("ok"):
-        raise RuntimeError(f"conversations.history: {data.get('error')}")
-    return data.get("messages", [])
+def _get_channel_history(channel: str, oldest_ts: str, limit: int = 100) -> list:
+    """拉取 oldest_ts 之后的全部消息，跟随 has_more/cursor 分页取尽。
+    Slack 返回按 ts 降序，这里翻转为升序，便于按处理顺序推进游标。"""
+    all_messages: list = []
+    cursor = None
+    for _ in range(MAX_HISTORY_PAGES):
+        params = {"channel": channel, "oldest": oldest_ts, "limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        data = _slack_get("conversations.history", params)
+        if not data.get("ok"):
+            raise RuntimeError(f"conversations.history: {data.get('error')}")
+        all_messages.extend(data.get("messages", []))
+        cursor = data.get("response_metadata", {}).get("next_cursor", "")
+        if not data.get("has_more") or not cursor:
+            break
+    all_messages.reverse()
+    return all_messages
 
 
 def _get_single_message(channel: str, ts: str) -> dict:
@@ -136,28 +148,36 @@ def run_slack_check() -> None:
 
     processed = _load_processed_ts()
     oldest_ts = _load_last_check_ts()
-    now_ts = str(datetime.now(timezone.utc).timestamp())
+    # 重叠窗口：从游标回退一段时间再查询，防边界时钟误差漏信；重复消息靠 processed 去重吸收
+    query_from_ts = str(max(0.0, float(oldest_ts) - CURSOR_OVERLAP_SECONDS))
 
     try:
-        messages = _get_channel_history(SLACK_MI_CHANNEL, oldest_ts)
+        messages = _get_channel_history(SLACK_MI_CHANNEL, query_from_ts)
     except Exception as e:
         logger.error(f"Slack history fetch failed: {e}")
         return
 
-    _save_last_check_ts(now_ts)
+    if not messages:
+        logger.info("No new Slack messages.")
+        return
 
     for msg in messages:
         ts = msg.get("ts", "")
-        if not ts or ts in processed:
+        if not ts:
+            continue
+        if ts in processed:
+            _save_last_check_ts(ts)
             continue
         if _is_bot_message(msg):
             _save_processed_ts(ts)
+            _save_last_check_ts(ts)
             continue
 
         user_id = msg.get("user", "")
         if SLACK_ALLOWED_USERS and user_id not in SLACK_ALLOWED_USERS:
             logger.info(f"Ignoring message from non-allowed user {user_id}")
             _save_processed_ts(ts)
+            _save_last_check_ts(ts)
             continue
 
         text = (msg.get("text") or "").strip()
@@ -181,6 +201,7 @@ def run_slack_check() -> None:
             logger.info(f"MI explicit query from {user_id}: {question[:80]}")
 
         _save_processed_ts(ts)
+        _save_last_check_ts(ts)
 
         if not question:
             continue
