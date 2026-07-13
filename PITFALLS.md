@@ -94,3 +94,11 @@ Bot token 格式 `{bot_user_id}:{secret}`，冒号前是 bot 自身 Telegram use
 
 ### 26. `_lookup_english_name` 的 `max_tokens=30` 让推理型 provider 把预算全花在思考上，`content=null` 崩溃（已修复 2026-07-13）
 验证 issue #25 归属 header 时手动触发了一次真实调用（`openai/gpt-oss-20b`，provider 落在 `DekaLLM`），返回 `finish_reason: "length"`、`content: null`、`reasoning` 里是一句被截断到一半的思考文本（"...no"）。原因和 PITFALLS.md #1/#11 是同一类：`max_tokens=30` 对这个 provider 而言太小，30 个 token 全部耗在 `reasoning` 字段的思考链上，还没轮到输出最终答案就被截断，调用方 `data["choices"][0]["message"]["content"].strip()` 对 `None` 调 `.strip()` 直接抛 `AttributeError`，被外层 `except Exception` 吞掉，函数返回空字符串——效果上和"未识别英文名"完全一样，日志里也看不出这是 token 预算问题还是模型真的不认识这家公司。**修复**：`max_tokens` 从 30 提到 300（实测同一 provider 在 300 token 预算下 `finish_reason: stop`，`content: "BYD"`，reasoning 只用了 32 token，思考本身很短，纯粹是预算给太紧）；取值方式改为 `(msg.get("content") or "").strip()`，避免 `None.strip()` 崩溃。**没有**照搬 #11 的 `content or reasoning` 兜底——这里的 `reasoning` 是半截思考句子，不是可用的英文名，回退到它会把垃圾文本悄悄写进公司配置，比返回空字符串（触发"未识别英文名，可回复纠正"提示）更危险。**教训**：`max_tokens` 过小导致推理模型 `content=null` 不是一次性修完的问题，是这类 OpenRouter 推理模型/provider 组合的通用风险——新增或修改任何走推理模型的调用点时，都要用真实请求核实 `finish_reason` 是 `stop` 而不是 `length`，不能只看"没报错"就认为 token 预算够用；`content or reasoning` 兜底本身也不是万能模板，要先确认 `reasoning` 字段的内容是不是真的能当作有效输出用。
+
+**后续（2026-07-13，未采纳，仅记录路径）**：用户指出 30/300 这两个数字都是"抄的、不是算出来的"——这个调用极低频（仅在用户邮件里加监控公司时触发一次），成本可忽略（166 token 约 $0.000008），没必要卡着刚好够用的最小 token 数。查过 OpenRouter 文档（[reasoning-tokens](https://openrouter.ai/docs/use-cases/reasoning-tokens)）并做过真实调用验证：可以传 `"reasoning": {"effort": "minimal"}` 主动压低这个模型的思考量，而不是被动加大 `max_tokens` 硬扛。实测对比（同一 prompt，`provider` 落在 `Amazon Bedrock`）：
+- 不传 `reasoning` 参数：reasoning_tokens ≈ 32-38
+- `reasoning: {"effort": "minimal"}`：reasoning_tokens = 9，`finish_reason: stop`，`content: "BYD"` 正确
+- `reasoning: {"effort": "none"}`：该模型不支持，返回 `HTTP 400`
+- `reasoning: {"exclude": true}`：只是不把思考文本包含在响应里，实际计算/token 消耗不变（38 token），不省钱不省延迟，价值有限
+
+当前 `max_tokens=300` 已经稳定工作（见本条修复），用户决定不动它——现状够用就不追求"更彻底"。但如果这个函数将来又复现同样的 `content=null`/`finish_reason=length` 症状（比如换了个思考更啰嗦的 provider），直接加 `"reasoning": {"effort": "minimal"}`，比继续加大 `max_tokens` 更对症：前者从根源减少思考 token 消耗，后者只是给更大的缓冲垫，不解决"预算被思考占用"这件事本身。
