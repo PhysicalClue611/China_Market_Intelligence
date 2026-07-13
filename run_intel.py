@@ -52,6 +52,9 @@ CURRENT_YEAR = datetime.now().year
 
 SEARCH_DAYS = 8        # Tavily: index freshness window (days)
 PUB_DATE_MAX_AGE = 9   # drop articles published > N days ago if date parseable
+EVENT_MAX_AGE_DAYS = 30  # drop prefilter-kept articles whose extracted underlying
+                         # event date (not the article's own publish/reprint date)
+                         # is older than this — see issue #12
 JINA_ENRICH_MAX = 5    # max articles to enrich per company (no-date English results)
 JINA_CACHE_CHARS = 4000  # full text stored in article cache
 JINA_LLM_CHARS = 2000    # full text passed to LLM prompt (vs 500 for plain snippets)
@@ -392,8 +395,9 @@ def prefilter_articles(
 3. 跨周去重：若某篇文章报道的事件与上周报告高度重叠（同一事件无新进展），从 keep 移除
 4. 信息量：若所有剩余文章均为PR稿、无实质内容（无战略变动、财务数据、合作/风险事件），返回 skip=true
 5. 长度建议：根据剩余文章质量和数量，建议报告段字数（200、400或600）
+6. 事件日期抽取：对每篇保留的文章，从标题/摘要中提取其报道的**核心事实性事件日期**（如财报期间、公告发布日、事件实际发生日期），格式 YYYY-MM-DD，无法判断则填 null。**必须区分"文章发布/转载时间"与"事件发生时间"**——例如英文媒体近期转载报道一年前的财报数据，event_date 应填财报对应的实际披露日期，不是转载文章本身的发布日期。
 
-直接输出JSON，禁止任何思考过程文字，禁止markdown代码块：{{"keep": [0,1,2,...], "skip": false, "skip_reason": "", "length_hint": 400}}"""
+直接输出JSON，禁止任何思考过程文字，禁止markdown代码块：{{"keep": [{{"i": 0, "event_date": "2026-07-09"}}, {{"i": 2, "event_date": null}}], "skip": false, "skip_reason": "", "length_hint": 400}}"""
 
     try:
         data, err = post_with_retry(
@@ -418,8 +422,33 @@ def prefilter_articles(
         if result.get("skip"):
             logger.info(f"[{company_zh}] Prefilter skip: {result.get('skip_reason', '')}")
             return [], 0
-        keep_indices = set(result.get("keep", range(len(articles))))
-        filtered = [a for i, a in enumerate(articles) if i in keep_indices]
+        keep_raw = result.get("keep", [{"i": i, "event_date": None} for i in range(len(articles))])
+        kept = []
+        for entry in keep_raw:
+            if isinstance(entry, dict):
+                idx, event_date = entry.get("i"), entry.get("event_date")
+            else:
+                idx, event_date = entry, None  # tolerate old int-list shape if LLM reverts to it
+            if isinstance(idx, int) and 0 <= idx < len(articles):
+                kept.append((idx, event_date))
+
+        # Deterministic backstop for issue #12: don't trust the LLM's own keep/skip
+        # judgment to have already applied its extracted event_date — enforce it in
+        # code. Articles whose event_date is unparseable/absent are kept unchanged
+        # (matches rule 1's "无法判断则保留").
+        event_cutoff = datetime.now() - timedelta(days=EVENT_MAX_AGE_DAYS)
+        filtered = []
+        event_dropped = 0
+        for idx, event_date in kept:
+            event_dt = _parse_pub_date(event_date) if event_date else None
+            if event_dt and event_dt < event_cutoff:
+                logger.info(f"[{company_zh}] Event-date filter: dropped '{articles[idx]['title'][:55]}' (event={event_date})")
+                event_dropped += 1
+                continue
+            filtered.append(articles[idx])
+        if event_dropped:
+            logger.info(f"[{company_zh}] Event-date filter: {len(kept)} → {len(filtered)} ({event_dropped} dropped, >{EVENT_MAX_AGE_DAYS}d)")
+
         length_hint = int(result.get("length_hint", 400))
         logger.info(f"[{company_zh}] Prefilter: {len(articles)} → {len(filtered)} articles, hint={length_hint}w")
         return filtered, length_hint
