@@ -123,7 +123,7 @@ def _save_cursor(ts: str):
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OR_ATTRIBUTION_HEADERS = {
-    "HTTP-Referer": "PhysicalClue611",
+    "HTTP-Referer": "https://github.com/PhysicalClue611/China_Market_Intelligence",
     "X-OpenRouter-Title": "MI",
 }
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
