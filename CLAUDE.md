@@ -18,7 +18,7 @@
 
 | 文件 | 用途 | 操作规则 |
 |------|------|---------|
-| `~/MI/PITFALLS.md` | 详细踩坑记录（22 条，报错原文/修复代码/教训），从本文件拆出以控制体积 | 每次修复新故障后追加新条目到文件末尾；排查 bug 前先读 |
+| `~/MI/PITFALLS.md` | 详细踩坑记录（25 条，报错原文/修复代码/教训），从本文件拆出以控制体积 | 每次修复新故障后追加新条目到文件末尾；排查 bug 前先读 |
 | `Hermes/MI/Hermes_MI设计文档.md`（Obsidian） | 系统架构设计文档，面向独立实现者，描述当前状态 | 架构/配置/模型选型变更时同步更新；"更新文档"指令必写 |
 | `Hermes/MI/Hermes_MI开发日志.md`（Obsidian） | 开发决策与踩坑记录，条目从新到旧 | 每次重要变更后追加新条目；"更新文档"指令必写 |
 
@@ -149,7 +149,7 @@ launchd 直接调 `~/MI/.venv/bin/python`，无 Docker，无 LLM 介入。
 | 情报主搜索 | Tavily `topic=general, days=8` → SerpApi → Serper |
 | 中文新闻补充 | Serper News (`/news, hl=zh-cn`) → SerpApi News (`tbm=nws`) |
 
-**OpenRouter 调用归属**（2026-07-12）：所有 `openrouter.ai/api/v1/chat/completions` 调用统一附加 `OR_ATTRIBUTION_HEADERS`（`HTTP-Referer: PhysicalClue611`、`X-OpenRouter-Title: MI`），定义在各文件 `OPENROUTER_API_KEY` 常量旁，调用点用 `**OR_ATTRIBUTION_HEADERS` 合并进 headers，不手写字面量。调用点：`email_check.py`（3 处）、`run_intel_deepseek_test.py`（1 处）。全局约定见 `~/.claude/CLAUDE.md` "OpenRouter API 归属 Header 约定"；新增 OpenRouter 调用点时同样遵循。
+**OpenRouter 调用归属**（2026-07-12，`HTTP-Referer` 格式于 2026-07-13 修正，见 PITFALLS.md #25）：所有 `openrouter.ai/api/v1/chat/completions` 调用统一附加 `OR_ATTRIBUTION_HEADERS`（`HTTP-Referer: https://github.com/PhysicalClue611/China_Market_Intelligence`、`X-OpenRouter-Title: MI`），定义在各文件 `OPENROUTER_API_KEY` 常量旁，调用点用 `**OR_ATTRIBUTION_HEADERS` 合并进 headers，不手写字面量。`HTTP-Referer` 必须是合法 URL（`https://` 开头），裸字符串会被 OR 静默丢弃整个归属。调用点：`email_check.py`（3 处）、`run_intel_deepseek_test.py`（1 处）。全局约定见 `~/.claude/CLAUDE.md` "OpenRouter API 归属 Header 约定"；新增 OpenRouter 调用点时同样遵循。
 
 ---
 
@@ -193,14 +193,13 @@ Obsidian 输出：`Paperview/Hermes/MI/YYYY-MM-DD-china-companies.md`
 
 ## 踩过的坑
 
-详细踩坑记录（23 条，含具体报错、修复代码、教训）已拆到 **`PITFALLS.md`**（同目录）。排查 bug、判断某类故障是否已知、或改动前想确认"这里以前踩过坑没有"时读取该文件。本文件只保留最近几条的一句话索引，完整上下文一律看 `PITFALLS.md`：
+详细踩坑记录（25 条，含具体报错、修复代码、教训）已拆到 **`PITFALLS.md`**（同目录）。排查 bug、判断某类故障是否已知、或改动前想确认"这里以前踩过坑没有"时读取该文件。本文件只保留最近几条的一句话索引，完整上下文一律看 `PITFALLS.md`：
 
-- #19 `.env` 缺 `FROM_ADDRESS` → Resend 422 静默失败（已修复，issue #1）
-- #20 `.env` 缺 JMAP 三变量 → 收信静默故障 3 周（已修复，issue #2）
 - #21 JMAP 24 小时滑动窗口 → 长中断后指令永久丢失（已修复，issue #5）
 - #22 JMAP 配置缺失非 fail-fast（已修复，issue #6）
 - #23 Slack 游标在处理消息前就写入 + 不分页 → 崩溃/积压均永久丢消息（已修复，issue #7）
 - #24 无日期转载文章绕过时效过滤 → 一年前旧财报被写成"本周新动态"（已修复，issue #12）
+- #25 OpenRouter `HTTP-Referer` 用裸字符串非 URL → 归属 header 静默失效（已修复 2026-07-13）
 
 ---
 
