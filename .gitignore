@@ -22,6 +22,7 @@ data/processed_email_ids.json
 data/jmap_cursor.json
 data/processed_slack_ts.json
 data/slack_last_check.json
+data/sama_relay_state.json
 
 # Runtime logs
 logs/
