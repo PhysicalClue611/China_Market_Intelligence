@@ -62,6 +62,7 @@
 | `com.hermes.intel` | 周日 08:59 PDT | `~/MI/run_intel.py` | `~/MI/logs/intel.log` | `~/MI/logs/intel-launchd.log` |
 | `com.hermes.emailcheck` | 每 5 分钟 | `~/MI/email_check.py` | `~/MI/logs/emailcheck.log` | `~/MI/logs/emailcheck-launchd.log` |
 | `com.hermes.mi-slack-check` | 每 5 分钟 | `~/MI/slack_check.py` | `~/MI/logs/slack-check.log` | `~/MI/logs/slack-check-launchd.log` |
+| `com.mi.sama-relay` | 每小时 | `~/MI/sama_relay.py` | `~/MI/logs/sama_relay.log` | `~/MI/logs/sama-relay-launchd.log` |
 
 日志已从 `/tmp` 迁移到项目自身目录 `~/MI/logs/`（2026-07-11，见 issue #1 [Comment] / #2）：`/tmp` 下超过 3 天未访问的文件会被 macOS 每日 `periodic` 清理任务删除，导致周执行任务的日志"看似不存在"、巡检误报。新方案由 `log_utils.py` 的 `setup_logging()` 提供 `TimedRotatingFileHandler`（`backupCount=30`），三个脚本的 `if __name__ == "__main__":` 均已改为调用它；plist 的 `StandardOutPath`/`StandardErrorPath` 只作为 import 期崩溃等无法走 Python logging 的场景的兜底，正常运行不会写入。
 
@@ -85,7 +86,8 @@ launchd 直接调 `~/MI/.venv/bin/python`，无 Docker，无 LLM 介入。
 | `SERPAPI_API_KEY` | Tavily 配额耗尽后备用（250次/月） |
 | `SERPER_API_KEY` | 三级 fallback |
 | `TELEGRAM_BOT_TOKEN` | 推送通知 |
-| `RESEND_API_KEY` | 邮件发送（Resend API，`re_...`） |
+| `RESEND_API_KEY` | 邮件发送（Resend API，Sending access，`re_...`） |
+| `RESEND_STATUS_KEY` | 邮件送达/退信状态查询（Resend API，Full access，`re_...`，与发信 key 分离，2026-07-12 新增） |
 | `STALWART_API_KEY` | 邮件收信 JMAP 认证（`API_...`） |
 | `JMAP_BASE` | Stalwart JMAP 服务器地址（`https://oci.physicalclue.us:8443`） |
 | `JMAP_ACCOUNT_ID` | JMAP 账号 ID（`c`，见 PITFALLS.md #20） |
@@ -107,6 +109,7 @@ launchd 直接调 `~/MI/.venv/bin/python`，无 Docker，无 LLM 介入。
 | `email_sender.py` | 邮件发送（Resend API），返回 Resend email ID |
 | `slack_sender.py` | Slack 发送（Bot Token 直连）：md_to_slack + 分块 thread |
 | `slack_check.py` | Slack 轮询（5min）：thread 回复 bot 消息 或 `mi: ` 前缀 → followup pipeline |
+| `sama_relay.py` | 每小时把 `PhysicalClue611/PC611-homepage` 仓库里标题含 `[sama]` 的最早一条 open issue 转发成邮件发给 `sama@openai.org`，成功后 close；运行开始时先核查上一次发送是否退信，退信则 reopen 重试 |
 | `gmail_client.py` | **已弃用**，Gmail OAuth2 封装，保留备查 |
 | `search_utils.py` | 三级搜索 fallback：Tavily → SerpApi → Serper |
 | `config_store.py` | 公司/收件人配置，优先读 Obsidian watchlist.md |
