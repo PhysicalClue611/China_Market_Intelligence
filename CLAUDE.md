@@ -197,6 +197,7 @@ Obsidian 输出：`Paperview/Hermes/MI/YYYY-MM-DD-china-companies.md`
 - #21 JMAP 24 小时滑动窗口 → 长中断后指令永久丢失（已修复，issue #5）
 - #22 JMAP 配置缺失非 fail-fast（已修复，issue #6）
 - #23 Slack 游标在处理消息前就写入 + 不分页 → 崩溃/积压均永久丢消息（已修复，issue #7）
+- #24 无日期转载文章绕过时效过滤 → 一年前旧财报被写成"本周新动态"（已修复，issue #12）
 
 ---
 
@@ -207,5 +208,6 @@ Obsidian 输出：`Paperview/Hermes/MI/YYYY-MM-DD-china-companies.md`
 | 日期过滤 | `_parse_pub_date()`，多格式，> 9天丢弃 | 运行中 |
 | L1 URL | `seen_urls.json` 90天TTL | 运行中 |
 | L2 标题 Jaccard | `article_cache.json`，阈值 0.45 | 运行中 |
-| L2.5 V4 Flash | 时效/相关性/跨周去重/信息量，max_tokens=1024 | 运行中 |
+| L2.5 V4 Flash | 时效/相关性/跨周去重/信息量/事件日期抽取，max_tokens=1024 | 运行中 |
+| 事件日期硬过滤 | `EVENT_MAX_AGE_DAYS=30`，对 V4 Flash 抽取的 event_date 做确定性丢弃，不信任模型自己的 keep 判断 | 运行中 |
 | L3 MemPalace 语义 | 待积累 3 月以上数据后启用 | 未启用 |
