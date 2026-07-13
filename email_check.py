@@ -371,7 +371,7 @@ def _lookup_english_name(zh_name: str) -> str:
             json_body={
                 "model": LLM_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 30,
+                "max_tokens": 300,
                 "provider": {
                     "order": ["Inceptron", "AkashML", "Nebius", "NovitaAI", "Parasail"],
                     "allow_fallbacks": True,
@@ -382,7 +382,8 @@ def _lookup_english_name(zh_name: str) -> str:
         if err:
             logger.warning(f"English name lookup failed for {zh_name}: {err}")
             return ""
-        return data["choices"][0]["message"]["content"].strip().strip('"')
+        msg = data["choices"][0]["message"]
+        return (msg.get("content") or "").strip().strip('"')
     except Exception as e:
         logger.warning(f"English name lookup failed for {zh_name}: {e}")
         return ""
