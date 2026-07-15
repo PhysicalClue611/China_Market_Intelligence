@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from http_utils import post_with_retry
+from http_utils import post_with_retry, extract_llm_text
 import config_store
 from email_sender import send_report
 from hermes_footer import get_footer
@@ -350,8 +350,7 @@ def _followup_three_stage(question: str) -> str:
         if r3_err:
             logger.error(f"Followup stage3 failed: {r3_err}")
             return f"（推理阶段失败：{r3_err}）"
-        msg = r3_data["choices"][0]["message"]
-        return (msg.get("content") or msg.get("reasoning_content") or msg.get("reasoning") or "").strip()
+        return extract_llm_text(r3_data["choices"][0]["message"])
     except Exception as e:
         logger.error(f"Followup stage3 failed: {e}")
         return f"（推理阶段失败：{e}）"

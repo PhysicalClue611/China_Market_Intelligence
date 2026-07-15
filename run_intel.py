@@ -14,7 +14,7 @@ import re
 
 import httpx
 
-from http_utils import post_with_retry
+from http_utils import post_with_retry, extract_llm_text
 from email_sender import send_report
 from slack_sender import post_report as post_slack_report
 from config_store import get_companies_full, get_recipients
@@ -377,16 +377,21 @@ def prefilter_articles(
     company_zh: str,
     articles: list[dict],
     last_report_section: str = "",
-) -> tuple[list[dict], int]:
+) -> tuple[list[dict], int, str]:
     """V4 Flash gate: filter low-value articles and cross-week duplicates.
 
     Also checks against last_report_section to remove articles whose content
     is already fully covered in the previous week's report.
 
-    Returns (filtered_articles, length_hint) where length_hint is 0 if all skipped.
+    Returns (filtered_articles, length_hint, status). length_hint is 0 if all
+    skipped. status is "ok" when the LLM gate actually ran, or
+    "llm_failed_passthrough" when the call/parse failed and all input articles
+    were passed through unfiltered — callers should distinguish the two in the
+    funnel log rather than reading a pass-through as "model kept everything"
+    (issue #10).
     """
     if not articles:
-        return [], 0
+        return [], 0, "ok"
 
     sgt_now = datetime.now(SGT).strftime("%Y-%m-%d %H:%M SGT")
     article_list = json.dumps(
@@ -435,13 +440,15 @@ def prefilter_articles(
         )
         if err:
             logger.warning(f"[{company_zh}] Prefilter LLM failed: {err}")
-            return articles, 400
-        raw = data["choices"][0]["message"].get("content") or ""
+            return articles, 400, "llm_failed_passthrough"
+        raw = extract_llm_text(data["choices"][0]["message"])
+        if not raw:
+            raise ValueError("empty content and reasoning_content/reasoning — likely max_tokens exhausted by reasoning")
         raw = re.sub(r"```json|```", "", raw).strip()
         result = json.loads(raw)
         if result.get("skip"):
             logger.info(f"[{company_zh}] Prefilter skip: {result.get('skip_reason', '')}")
-            return [], 0
+            return [], 0, "ok"
         keep_raw = result.get("keep", [{"i": i, "event_date": None} for i in range(len(articles))])
         kept = []
         for entry in keep_raw:
@@ -471,10 +478,10 @@ def prefilter_articles(
 
         length_hint = int(result.get("length_hint", 400))
         logger.info(f"[{company_zh}] Prefilter: {len(articles)} → {len(filtered)} articles, hint={length_hint}w")
-        return filtered, length_hint
+        return filtered, length_hint, "ok"
     except Exception as e:
         logger.warning(f"[{company_zh}] Prefilter failed (pass-through): {e}")
-        return articles, 400
+        return articles, 400, "llm_failed_passthrough"
 
 
 # ── LLM synthesis (V4 Pro) ────────────────────────────────────────────────────
@@ -545,10 +552,8 @@ def synthesize_with_llm(
     if err:
         return None, {}
     usage = data.get("usage", {})
-    msg = data["choices"][0]["message"]
-    # DeepSeek Pro: reasoning_content holds thinking chain, content holds final answer
-    content = msg.get("content") or msg.get("reasoning_content") or msg.get("reasoning") or ""
-    return content.strip(), usage
+    content = extract_llm_text(data["choices"][0]["message"])
+    return content, usage
 
 
 # ── Telegram alert ───────────────────────────────────────────────────────────
@@ -639,8 +644,9 @@ def run_intel(recipients: list[str] | None = None, force: bool = False):
             continue
 
         # Prefilter: V4 Flash quality + cross-week dedup gate
-        new_results, length_hint = prefilter_articles(zh, new_results, last_week_section)
+        new_results, length_hint, prefilter_status = prefilter_articles(zh, new_results, last_week_section)
         funnel["after_prefilter"] = len(new_results)
+        funnel["prefilter_status"] = prefilter_status
         if not new_results:
             logger.info(f"[{zh}] Prefilter: no actionable intel, skipping section")
             logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")

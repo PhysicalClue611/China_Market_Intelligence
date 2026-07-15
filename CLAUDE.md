@@ -201,6 +201,7 @@ Obsidian 输出：`Paperview/Hermes/MI/YYYY-MM-DD-china-companies.md`
 - #25 OpenRouter `HTTP-Referer` 用裸字符串非 URL → 归属 header 静默失效（已修复 2026-07-13）
 - #26 `_lookup_english_name` `max_tokens=30` 太小 → 推理耗尽预算，`content=null` 崩溃（已修复 2026-07-13）
 - #27 Slack/email 先标记已处理后发送回复 + run_intel/slack_check 缺关键 env 仍 exit 0（已修复 2026-07-15，issue #8/#9/#11）
+- #28 `prefilter_articles()` 漏 `reasoning_content` 兜底 → content=null 时门控静默 pass-through（已修复 2026-07-15，issue #10）
 
 ---
 

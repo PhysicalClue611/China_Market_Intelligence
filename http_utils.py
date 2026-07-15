@@ -54,6 +54,17 @@ def post_with_retry(url: str, *, headers: dict, json_body: dict,
     return None, f"all {max_retries + 1} attempts failed: {last_err}"
 
 
+def extract_llm_text(msg: dict) -> str:
+    """DeepSeek/reasoning 模型兼容取值：优先 content，为空则退到思考链字段。
+
+    推理模型（V4 Flash/Pro）先在 reasoning_content（或旧字段 reasoning）里写
+    思考链，最终答案写入 content；token 预算不够时 content 可能为 null，此时
+    最终答案实际落在 reasoning_content 里。所有 DeepSeek 调用点取值都应走这里，
+    不要各自手写 `content or reasoning...` 链（见 PITFALLS.md #1/#11/#26，issue #10）。
+    """
+    return (msg.get("content") or msg.get("reasoning_content") or msg.get("reasoning") or "").strip()
+
+
 def get_with_retry(url: str, *, params: dict, timeout: float,
                    max_retries: int = 2) -> tuple:
     """GET url with query params; retry on network errors and 5xx.
