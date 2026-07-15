@@ -38,6 +38,23 @@ SLACK_API_BASE = "https://slack.com/api"
 # Messages with this user or any bot_id are treated as bot output, not user queries.
 SLACK_BOT_USER_ID = "U0B4ETW2SCE"
 
+
+class SlackConfigError(RuntimeError):
+    """必需的 Slack 配置缺失，属于部署错误，不应被当作普通轮询失败吞掉（exit 0）。"""
+
+
+def _validate_slack_config():
+    """启动时校验必需环境变量非空，缺失则直接抛出（fail fast），日志只报变量名不报值。"""
+    missing = [name for name, value in {
+        "SLACK_BOT_TOKEN": SLACK_BOT_TOKEN,
+        "SLACK_MI_CHANNEL": SLACK_MI_CHANNEL,
+    }.items() if not value]
+    if missing:
+        raise SlackConfigError(
+            f"Missing required Slack config: {', '.join(missing)} — check .env"
+        )
+
+
 MI_PREFIX = "mi:"  # explicit prefix for standalone MI queries
 PROCESSED_TS_TTL = 72 * 3600  # seconds before processed-ts entries expire
 CURSOR_OVERLAP_SECONDS = 600  # 重叠窗口，防止游标边界的时钟误差漏信；重复消息靠 processed_ts 去重
@@ -139,12 +156,7 @@ def _is_bot_message(msg: dict) -> bool:
 # ── Main polling loop ─────────────────────────────────────────────────────────
 
 def run_slack_check() -> None:
-    if not SLACK_BOT_TOKEN:
-        logger.error("SLACK_BOT_TOKEN not set")
-        return
-    if not SLACK_MI_CHANNEL:
-        logger.info("SLACK_MI_CHANNEL not set, nothing to poll")
-        return
+    _validate_slack_config()  # 缺失关键配置直接抛出，不落入静默 return（issue #11）
 
     processed = _load_processed_ts()
     oldest_ts = _load_last_check_ts()
@@ -200,10 +212,10 @@ def run_slack_check() -> None:
             question = text[len(MI_PREFIX):].strip()
             logger.info(f"MI explicit query from {user_id}: {question[:80]}")
 
-        _save_processed_ts(ts)
-        _save_last_check_ts(ts)
-
         if not question:
+            # 无 question 的路径（thread 父消息非 bot 等）：无业务要执行，可安全标记已处理
+            _save_processed_ts(ts)
+            _save_last_check_ts(ts)
             continue
 
         logger.info(f"Running followup pipeline for: {question[:100]}")
@@ -214,8 +226,17 @@ def run_slack_check() -> None:
             answer = f"（分析失败：{e}）"
 
         reply_thread = thread_ts if is_reply else ts
-        post_message(SLACK_MI_CHANNEL, answer, thread_ts=reply_thread)
-        logger.info(f"Replied in thread {reply_thread}")
+        posted_ts = post_message(SLACK_MI_CHANNEL, answer, thread_ts=reply_thread)
+        if posted_ts:
+            # 仅在回复确认投递后才推进 processed/cursor，避免崩溃或发送失败导致提问永久丢失（issue #8）
+            _save_processed_ts(ts)
+            _save_last_check_ts(ts)
+            logger.info(f"Replied in thread {reply_thread}")
+        else:
+            logger.error(
+                f"post_message failed for ts={ts} (thread={reply_thread}) — "
+                f"not marking processed, will retry next poll"
+            )
 
 
 if __name__ == "__main__":

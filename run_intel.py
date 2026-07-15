@@ -26,6 +26,26 @@ from search_utils import search as search_news, search_cn as search_cn_news
 
 logger = logging.getLogger(__name__)
 
+
+class IntelConfigError(RuntimeError):
+    """必需的情报配置缺失，属于部署错误，不应被当作单次抓取失败静默吞掉（exit 0）。"""
+
+
+def _validate_intel_config():
+    """启动时校验必需环境变量非空，缺失则直接抛出（fail fast），日志只报变量名不报值。"""
+    required = {
+        "TAVILY_API_KEY": TAVILY_API_KEY,
+        "DEEPSEEK_API_KEY": DEEPSEEK_API_KEY,
+        "HERMES_DATA": os.getenv("HERMES_DATA", ""),
+        "OBSIDIAN_PATH": os.getenv("OBSIDIAN_PATH", ""),
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise IntelConfigError(
+            f"Missing required intel config: {', '.join(missing)} — check .env"
+        )
+
+
 DATA_DIR = Path(os.getenv("HERMES_DATA", "/opt/data"))
 OBSIDIAN_DIR = Path(os.getenv("OBSIDIAN_PATH", "/opt/obsidian"))
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
@@ -555,13 +575,7 @@ def _send_telegram_alert(text: str):
 
 def run_intel(recipients: list[str] | None = None, force: bool = False):
     logger.info(f"Starting intelligence pull (force={force})...")
-
-    if not TAVILY_API_KEY:
-        logger.error("TAVILY_API_KEY not set, skipping")
-        return
-    if not DEEPSEEK_API_KEY:
-        logger.error("DEEPSEEK_API_KEY not set, skipping")
-        return
+    _validate_intel_config()  # 缺失关键配置直接抛出，不落入下面逻辑被静默吞掉（issue #11）
 
     date_str = datetime.now().strftime("%Y-%m-%d")
     uid = f"HRM-{datetime.now().strftime('%Y%m%d-%H%M%S')}"

@@ -556,6 +556,11 @@ def run_email_check(backfill_hours: int | None = None):
 
     logger.info(f"Found {len(new_emails)} unprocessed command email(s).")
 
+    # 一旦某封邮件的回复发送失败就停止推进游标（即使后面的邮件处理成功），
+    # 否则游标会跳过失败邮件、使其永久无法被重试捕获（issue #9）。
+    # processed_ids 仍会为后续成功的邮件正常写入，靠它们各自的 id 避免重复处理。
+    cursor_stalled = False
+
     for email in new_emails:
         email_id = email["id"]
 
@@ -570,11 +575,12 @@ def run_email_check(backfill_hours: int | None = None):
         msg_id_list = email.get("messageId") or []
         original_msg_id = msg_id_list[0] if msg_id_list else ""
 
-        # 安全过滤：只处理授权发件人
+        # 安全过滤：只处理授权发件人（无需回复，可安全标记已处理）
         if sender_email not in {r.lower() for r in authorized}:
             logger.info(f"Ignored email from unauthorized sender: {sender}")
             _save_processed_id(email_id)
-            _advance_cursor(email)
+            if not cursor_stalled:
+                _advance_cursor(email)
             continue
 
         body = _jmap_body(email)
@@ -589,7 +595,8 @@ def run_email_check(backfill_hours: int | None = None):
         ref_info = f" | 引用ID：{ref_uid}" if ref_uid else ""
         ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        def _send_result_email(result_text: str, is_followup: bool = False):
+        def _send_result_email(result_text: str, is_followup: bool = False) -> bool:
+            """发送回复邮件，返回是否发送成功（issue #9：调用方据此决定是否推进 inbound 处理状态）。"""
             if is_followup:
                 body_text = f"""指令：{desc}
 
@@ -618,10 +625,14 @@ def run_email_check(backfill_hours: int | None = None):
             )
             if sid:
                 _save_processed_id(sid)
+                return True
+            return False
 
         def _on_async_done(result_text: str):
-            _send_result_email(result_text, is_followup=True)
-            logger.info(f"Async done, result sent: {new_uid}")
+            if _send_result_email(result_text, is_followup=True):
+                logger.info(f"Async done, result sent: {new_uid}")
+            else:
+                logger.error(f"Async done but result send failed: {new_uid} (email_id={email_id})")
             _send_telegram_alert(f"[Hermes] 邮件指令完成 ✓\n指令：{desc}\nID：{new_uid}")
 
         result_text, is_async = _execute_command(
@@ -643,16 +654,27 @@ def run_email_check(backfill_hours: int | None = None):
                 reply_to_msg_id=original_msg_id,
                 recipient_override=sender_email,
             )
+            reply_sent = bool(sid)
             if sid:
                 _save_processed_id(sid)
             _send_telegram_alert(f"[Hermes] 邮件指令 ⏳\n指令：{desc}\n执行中，完成后通知\nID：{new_uid}")
         else:
-            _send_result_email(result_text, is_followup=False)
+            reply_sent = _send_result_email(result_text, is_followup=False)
             _send_telegram_alert(f"[Hermes] 邮件指令 ✓\n指令：{desc}\nID：{new_uid}")
 
-        _save_processed_id(email_id)
-        _advance_cursor(email)
-        logger.info(f"Done: {new_uid}")
+        # 仅在回复（同步结果或异步 ack）确认送达后才推进 inbound 处理状态；
+        # 发送失败则不标记已处理、不推进游标，下一轮靠 processed_ids 未命中重试（issue #9）。
+        if reply_sent:
+            _save_processed_id(email_id)
+            if not cursor_stalled:
+                _advance_cursor(email)
+            logger.info(f"Done: {new_uid}")
+        else:
+            cursor_stalled = True
+            logger.error(
+                f"Reply send failed for {new_uid} (email_id={email_id}, subject={subject!r}) — "
+                f"inbound not marked processed, cursor stalled, will retry next poll"
+            )
 
     # Wait for any background tasks (run_intel / add_recipient) before process exits.
     for t in _background_threads:

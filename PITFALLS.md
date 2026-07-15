@@ -102,3 +102,19 @@ Bot token 格式 `{bot_user_id}:{secret}`，冒号前是 bot 自身 Telegram use
 - `reasoning: {"exclude": true}`：只是不把思考文本包含在响应里，实际计算/token 消耗不变（38 token），不省钱不省延迟，价值有限
 
 当前 `max_tokens=300` 已经稳定工作（见本条修复），用户决定不动它——现状够用就不追求"更彻底"。但如果这个函数将来又复现同样的 `content=null`/`finish_reason=length` 症状（比如换了个思考更啰嗦的 provider），直接加 `"reasoning": {"effort": "minimal"}`，比继续加大 `max_tokens` 更对症：前者从根源减少思考 token 消耗，后者只是给更大的缓冲垫，不解决"预算被思考占用"这件事本身。
+
+### 27. 三处"先标记已处理，后执行有风险操作"+ 两个入口缺失关键 env 仍 exit 0（已修复 2026-07-15，issue #8/#9/#11）
+issue #5/#6/#7（踩坑 #20-23）修过的两类模式在其余入口原样存在，只是换了个地方复现：
+
+**(a) 先写水位线/处理标记，后执行会失败的操作**（issue #8、#9，与 #23 同族）：
+- `slack_check.py` 对有效追问（thread 回复 / `mi:` 前缀）：`_save_processed_ts`/`_save_last_check_ts` 写在 `_followup_three_stage()` 和 `post_message()` **之前**，pipeline 崩溃或 `chat.postMessage` 失败（token 过期/限流/权限）只返回 `None`、调用方不检查，追问永久丢失、不会重试。
+- `email_check.py` 的 `run_email_check()` 对每封授权邮件：`_save_processed_id(email_id)` + `_advance_cursor(email)` 在回复邮件发送之后**无条件**执行，`send_report()`（Resend 故障/限流/密钥失效）失败只返回 `None` 不抛异常，调用方不检查，指令已在服务端执行（如 `add_company`）但用户永远收不到回复，且不会重试。
+
+**(b) 关键 env 缺失仍静默 return，exit 0**（issue #11，与 #22 同族）：`run_intel.py`（`TAVILY_API_KEY`/`DEEPSEEK_API_KEY`）、`slack_check.py`（`SLACK_BOT_TOKEN`/`SLACK_MI_CHANNEL`）在缺失时只 `logger.error`/`logger.info` 后 `return`，launchd 判定"成功"，只有 #22 修过的 `email_check.py` 有 fail-fast。
+
+**修复**：
+- `run_intel.py` 新增 `_validate_intel_config()`（`TAVILY_API_KEY`/`DEEPSEEK_API_KEY`/`HERMES_DATA`/`OBSIDIAN_PATH`），`slack_check.py` 新增 `_validate_slack_config()`（`SLACK_BOT_TOKEN`/`SLACK_MI_CHANNEL`），均在入口函数最开头调用，缺失即抛专用异常（`IntelConfigError`/`SlackConfigError`），逃逸到既有 `__main__` try/except/raise 触发非零 exit——与 `email_check.py` 的 `JMAPConfigError` 同一模式。
+- `slack_check.py`：有效追问改为先跑 `_followup_three_stage` + `post_message`，仅当 `post_message` 返回非空 ts 后才写 processed/cursor；`post_message` 失败只记 ERROR，留给下一轮重叠窗口重试。无 question 的路径（非白名单、机器人消息、thread 父消息非 bot）无业务副作用，continue 前立即标记不受影响。
+- `email_check.py`：`_send_result_email()` 改为返回 bool；同步/异步（ack）两条路径均只在发送成功后才 `_save_processed_id(email_id)` + `_advance_cursor`。额外加了 `cursor_stalled` 标志——同一批次里，若某封邮件回复失败，即使批次内更晚的邮件回复成功，也不再推进游标，防止游标跳过失败邮件导致其永久无法被重叠窗口捕获重试（未授权发件人的跳过路径无需回复，标记不受 `cursor_stalled` 影响，但游标推进仍受其约束）。
+
+**教训**：这是同一个模式家族第 4/5 次出现（#20/#22 是"env 缺失"，#23 是"先写游标后处理"）——修 bug 时只堵住触发它的那一个入口，不代表同一代码库里结构相同的其他入口也修了；新入口/新轮询循环一律要检查"标记完成"和"业务副作用是否已确认成功"这两个时间点有没有被错误合并，以及关键配置缺失是不是走了 fail-fast 而不是静默降级。
