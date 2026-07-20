@@ -101,6 +101,10 @@ def call_llm_json(url: str, *, headers: dict, json_body: dict, timeout: float,
             if logger:
                 logger.warning(f"[{label}] LLM response missing choices/message (attempt {attempt}/{max_attempts}): {e}; data={data!r}")
             continue
+        if not isinstance(message, dict):
+            if logger:
+                logger.warning(f"[{label}] LLM response message is not a dict (attempt {attempt}/{max_attempts}): {type(message).__name__} {message!r}")
+            continue
         raw = extract_llm_text(message)
         if not raw:
             if logger:
