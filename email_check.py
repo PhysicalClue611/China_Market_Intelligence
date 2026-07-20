@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from http_utils import post_with_retry, extract_llm_text
+from http_utils import post_with_retry, extract_llm_text, call_llm_json
 import config_store
 from email_sender import send_report
 from hermes_footer import get_footer
@@ -216,32 +216,26 @@ def _parse_command(email_text: str) -> dict:
 - 分析问题、跟进提问、观点请求（非配置操作）：{{"action": "followup_question"}}
 - 无法识别：{{"action": "unknown"}}"""
 
-    try:
-        data, err = post_with_retry(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", **OR_ATTRIBUTION_HEADERS},
-            json_body={
-                "model": LLM_MODEL,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                "provider": {
-                    "order": ["Inceptron", "AkashML", "Nebius", "NovitaAI", "Parasail"],
-                    "allow_fallbacks": True,
-                },
+    result = call_llm_json(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", **OR_ATTRIBUTION_HEADERS},
+        json_body={
+            "model": LLM_MODEL,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "provider": {
+                "order": ["Inceptron", "AkashML", "Nebius", "NovitaAI", "Parasail"],
+                "allow_fallbacks": True,
             },
-            timeout=30,
-        )
-        if err:
-            logger.error(f"LLM parse failed: {err}")
-            return {"action": "unknown"}
-        raw = data["choices"][0]["message"]["content"].strip()
-        raw = re.sub(r"```json|```", "", raw).strip()
-        return json.loads(raw)
-    except Exception as e:
-        logger.error(f"LLM parse failed: {e}")
-        return {"action": "unknown"}
+            "response_format": {"type": "json_object"},
+        },
+        timeout=30,
+        logger=logger,
+        label="ParseCommand",
+    )
+    return result if result is not None else {"action": "unknown"}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -282,26 +276,21 @@ def _followup_three_stage(question: str) -> str:
 4. 分析框架建议（SWOT/竞争格局/风险评估/机会识别，选一种）
 
 只返回JSON，不要其他内容：{{"summary": "...", "entities": ["..."], "queries": ["...","..."], "framework": "..."}}"""
-    try:
-        r1_data, r1_err = post_with_retry(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", **OR_ATTRIBUTION_HEADERS},
-            json_body={
-                "model": LLM_MODEL,
-                "messages": [{"role": "user", "content": stage1_prompt}],
-                "max_tokens": 300,
-                "provider": provider_cfg,
-            },
-            timeout=30,
-        )
-        if r1_err:
-            logger.error(f"Followup stage1 failed: {r1_err}")
-            return "（分析阶段失败，请稍后重试）"
-        raw = r1_data["choices"][0]["message"]["content"].strip()
-        raw = re.sub(r"```json|```", "", raw).strip()
-        stage1 = json.loads(raw)
-    except Exception as e:
-        logger.error(f"Followup stage1 failed: {e}")
+    stage1 = call_llm_json(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", **OR_ATTRIBUTION_HEADERS},
+        json_body={
+            "model": LLM_MODEL,
+            "messages": [{"role": "user", "content": stage1_prompt}],
+            "max_tokens": 2048,
+            "provider": provider_cfg,
+            "response_format": {"type": "json_object"},
+        },
+        timeout=30,
+        logger=logger,
+        label="FollowupStage1",
+    )
+    if stage1 is None:
         return "（分析阶段失败，请稍后重试）"
 
     summary = stage1.get("summary", question)

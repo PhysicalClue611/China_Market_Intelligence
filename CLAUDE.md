@@ -18,7 +18,7 @@
 
 | 文件 | 用途 | 操作规则 |
 |------|------|---------|
-| `~/MI/PITFALLS.md` | 详细踩坑记录（26 条，报错原文/修复代码/教训），从本文件拆出以控制体积 | 每次修复新故障后追加新条目到文件末尾；排查 bug 前先读 |
+| `~/MI/PITFALLS.md` | 详细踩坑记录（29 条，报错原文/修复代码/教训），从本文件拆出以控制体积 | 每次修复新故障后追加新条目到文件末尾；排查 bug 前先读 |
 | `Hermes/MI/Hermes_MI设计文档.md`（Obsidian） | 系统架构设计文档，面向独立实现者，描述当前状态 | 架构/配置/模型选型变更时同步更新；"更新文档"指令必写 |
 | `Hermes/MI/Hermes_MI开发日志.md`（Obsidian） | 开发决策与踩坑记录，条目从新到旧 | 每次重要变更后追加新条目；"更新文档"指令必写 |
 
@@ -115,7 +115,7 @@ launchd 直接调 `~/MI/.venv/bin/python`，无 Docker，无 LLM 介入。
 | `config_store.py` | 公司/收件人配置，优先读 Obsidian watchlist.md |
 | `dedup_utils.py` | L2 Jaccard + L3 MemPalace 去重 |
 | `article_cache.py` | 文章全文缓存（90天TTL） |
-| `http_utils.py` | httpx 重试封装（网络错误/5xx 重试，4xx 不重试） |
+| `http_utils.py` | httpx 重试封装（网络错误/5xx 重试，4xx 不重试）；`extract_llm_text()` 统一取 DeepSeek/推理模型 content/reasoning_content/reasoning；`call_llm_json()` 统一封装"调用+取值+解析 LLM JSON 输出"，内置对坏输出（非网络问题）的重试与诊断日志，见 PITFALLS.md #29 |
 | `memory_context.py` | 每公司 LLM 前注入历史上下文（bridge REST）：MemPalace 语义搜索（三路 query）+ Obsidian 全文搜索 |
 
 ---
@@ -150,6 +150,8 @@ launchd 直接调 `~/MI/.venv/bin/python`，无 Docker，无 LLM 介入。
 | 中文新闻补充 | Serper News (`/news, hl=zh-cn`) → SerpApi News (`tbm=nws`) |
 
 **OpenRouter 调用归属**（2026-07-12，`HTTP-Referer` 格式于 2026-07-13 修正，见 PITFALLS.md #25）：所有 `openrouter.ai/api/v1/chat/completions` 调用统一附加 `OR_ATTRIBUTION_HEADERS`（`HTTP-Referer: https://github.com/PhysicalClue611/China_Market_Intelligence`、`X-OpenRouter-Title: MI`），定义在各文件 `OPENROUTER_API_KEY` 常量旁，调用点用 `**OR_ATTRIBUTION_HEADERS` 合并进 headers，不手写字面量。`HTTP-Referer` 必须是合法 URL（`https://` 开头），裸字符串会被 OR 静默丢弃整个归属。调用点：`email_check.py`（3 处）、`run_intel_deepseek_test.py`（1 处）。全局约定见 `~/.claude/CLAUDE.md` "OpenRouter API 归属 Header 约定"；新增 OpenRouter 调用点时同样遵循。
+
+**要求 JSON 输出的调用一律加 `response_format: {"type": "json_object"}`**（2026-07-19，见 PITFALLS.md #29）：DeepSeek 直连和 OpenRouter（含 `openai/gpt-oss-20b` 走 5-provider 池）均已用真实请求验证支持，返回 200 且输出为干净 JSON。从 API 层面约束输出格式，比事后解析更治本；新增任何"prompt 要求模型只输出 JSON"的调用点都应带上这个参数，不要只依赖 prompt 里的文字约束。取值/解析统一走 `http_utils.call_llm_json()`（内置重试+诊断日志，见上表 `http_utils.py` 行），不要在调用点各自手写。
 
 ---
 
@@ -193,15 +195,14 @@ Obsidian 输出：`Paperview/Hermes/MI/YYYY-MM-DD-china-companies.md`
 
 ## 踩过的坑
 
-详细踩坑记录（26 条，含具体报错、修复代码、教训）已拆到 **`PITFALLS.md`**（同目录）。排查 bug、判断某类故障是否已知、或改动前想确认"这里以前踩过坑没有"时读取该文件。本文件只保留最近几条的一句话索引，完整上下文一律看 `PITFALLS.md`：
+详细踩坑记录（29 条，含具体报错、修复代码、教训）已拆到 **`PITFALLS.md`**（同目录）。排查 bug、判断某类故障是否已知、或改动前想确认"这里以前踩过坑没有"时读取该文件。本文件只保留最近几条的一句话索引，完整上下文一律看 `PITFALLS.md`：
 
-- #22 JMAP 配置缺失非 fail-fast（已修复，issue #6）
-- #23 Slack 游标在处理消息前就写入 + 不分页 → 崩溃/积压均永久丢消息（已修复，issue #7）
 - #24 无日期转载文章绕过时效过滤 → 一年前旧财报被写成"本周新动态"（已修复，issue #12）
 - #25 OpenRouter `HTTP-Referer` 用裸字符串非 URL → 归属 header 静默失效（已修复 2026-07-13）
 - #26 `_lookup_english_name` `max_tokens=30` 太小 → 推理耗尽预算，`content=null` 崩溃（已修复 2026-07-13）
 - #27 Slack/email 先标记已处理后发送回复 + run_intel/slack_check 缺关键 env 仍 exit 0（已修复 2026-07-15，issue #8/#9/#11）
 - #28 `prefilter_articles()` 漏 `reasoning_content` 兜底 → content=null 时门控静默 pass-through（已修复 2026-07-15，issue #10）
+- #29 徐工年份错位事故：`json.loads` 无法区分"真空"与"格式错误"+ 手写重试补丁在 3 处调用点各自漏了 try/except 保护 → 引入 4 个新 bug，最终收敛为共享 `call_llm_json()` + `response_format=json_object`（已修复 2026-07-19）
 
 ---
 
@@ -212,6 +213,6 @@ Obsidian 输出：`Paperview/Hermes/MI/YYYY-MM-DD-china-companies.md`
 | 日期过滤 | `_parse_pub_date()`，多格式，> 9天丢弃 | 运行中 |
 | L1 URL | `seen_urls.json` 90天TTL | 运行中 |
 | L2 标题 Jaccard | `article_cache.json`，阈值 0.45 | 运行中 |
-| L2.5 V4 Flash | 时效/相关性/跨周去重/信息量/事件日期抽取，max_tokens=1024 | 运行中 |
+| L2.5 V4 Flash | 时效/相关性/跨周去重/信息量/事件日期抽取，max_tokens=4096，`response_format=json_object` | 运行中 |
 | 事件日期硬过滤 | `EVENT_MAX_AGE_DAYS=30`，对 V4 Flash 抽取的 event_date 做确定性丢弃，不信任模型自己的 keep 判断 | 运行中 |
 | L3 MemPalace 语义 | 待积累 3 月以上数据后启用 | 未启用 |

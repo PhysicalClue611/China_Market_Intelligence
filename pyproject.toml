@@ -10,4 +10,5 @@ dependencies = [
     "google-auth-oauthlib",
     "google-auth-httplib2",
     "google-api-python-client",
+    "json-repair>=0.61.6",
 ]

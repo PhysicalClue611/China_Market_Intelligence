@@ -14,7 +14,7 @@ import re
 
 import httpx
 
-from http_utils import post_with_retry, extract_llm_text
+from http_utils import post_with_retry, extract_llm_text, call_llm_json
 from email_sender import send_report
 from slack_sender import post_report as post_slack_report
 from config_store import get_companies_full, get_recipients
@@ -424,28 +424,26 @@ def prefilter_articles(
 
 直接输出JSON，禁止任何思考过程文字，禁止markdown代码块：{{"keep": [{{"i": 0, "event_date": "2026-07-09"}}, {{"i": 2, "event_date": null}}], "skip": false, "skip_reason": "", "length_hint": 400}}"""
 
+    result = call_llm_json(
+        DEEPSEEK_BASE_URL,
+        headers={
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json_body={
+            "model": LLM_MODEL_FLASH,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 4096,
+            "response_format": {"type": "json_object"},
+        },
+        timeout=45,
+        logger=logger,
+        label=f"{company_zh} Prefilter",
+    )
+    if result is None:
+        return articles, 400, "llm_failed_passthrough"
+
     try:
-        data, err = post_with_retry(
-            DEEPSEEK_BASE_URL,
-            headers={
-                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json_body={
-                "model": LLM_MODEL_FLASH,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 1024,
-            },
-            timeout=45,
-        )
-        if err:
-            logger.warning(f"[{company_zh}] Prefilter LLM failed: {err}")
-            return articles, 400, "llm_failed_passthrough"
-        raw = extract_llm_text(data["choices"][0]["message"])
-        if not raw:
-            raise ValueError("empty content and reasoning_content/reasoning — likely max_tokens exhausted by reasoning")
-        raw = re.sub(r"```json|```", "", raw).strip()
-        result = json.loads(raw)
         if result.get("skip"):
             logger.info(f"[{company_zh}] Prefilter skip: {result.get('skip_reason', '')}")
             return [], 0, "ok"
