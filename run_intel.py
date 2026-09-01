@@ -38,6 +38,7 @@ def _validate_intel_config():
     required = {
         "TAVILY_API_KEY": TAVILY_API_KEY,
         "DEEPSEEK_API_KEY": DEEPSEEK_API_KEY,
+        "OPENROUTER_API_KEY": OPENROUTER_API_KEY,
         "HERMES_DATA": os.getenv("HERMES_DATA", ""),
         "OBSIDIAN_PATH": os.getenv("OBSIDIAN_PATH", ""),
     }
@@ -53,6 +54,11 @@ OBSIDIAN_DIR = Path(os.getenv("OBSIDIAN_PATH", "/opt/obsidian"))
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/chat/completions"
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OR_ATTRIBUTION_HEADERS = {
+    "HTTP-Referer": "https://github.com/PhysicalClue611/China_Market_Intelligence",
+    "X-OpenRouter-Title": "MI",
+}
 JINA_API_KEY = os.getenv("JINA_API_KEY", "")
 JINA_BASE_URL = "https://r.jina.ai"
 
@@ -63,8 +69,18 @@ SEEN_URL_TTL_DAYS = 90
 EINTR_MAX_ATTEMPTS = 4     # iCloud scandir EINTR retries before degrading (issue #15)
 EINTR_RETRY_SLEEP = 0.1    # seconds between retries
 
-LLM_MODEL_FLASH = "deepseek-v4-flash"   # prefilter gate
-LLM_MODEL_PRO   = "deepseek-v4-pro"     # final synthesis
+PREFILTER_MODEL = "google/gemma-4-31b-it"   # prefilter gate — OpenRouter, reasoning off (issue #17)
+LLM_MODEL_PRO   = "deepseek-v4-pro"         # final synthesis — DeepSeek direct
+
+# Prefilter provider pool (issue #17): reasoning off must actually be honored.
+# Together leaks reasoning on this model (~67% of calls), so it is excluded.
+# allow_fallbacks=false: if all three preferred hosts are unreachable, fail
+# through to llm_failed_passthrough rather than landing on an untested backend.
+PREFILTER_PROVIDER_CFG = {
+    "order": ["Crusoe", "Friendli", "OpenInference"],
+    "ignore": ["Together"],
+    "allow_fallbacks": False,
+}
 
 SYSTEM_PROMPT = (
     "你是一名国际顶尖IT咨询公司的合伙人，专注于拓展战略咨询与IT咨询业务，"
@@ -408,14 +424,15 @@ def fetch_company_raw(company: dict) -> tuple[list[dict], dict] | tuple[None, di
     return relevant, funnel
 
 
-# ── Prefilter (V4 Flash) ──────────────────────────────────────────────────────
+# ── Prefilter (OR Gemma, reasoning off) ──────────────────────────────────────
 
 def prefilter_articles(
     company_zh: str,
     articles: list[dict],
     last_report_section: str = "",
 ) -> tuple[list[dict], int, str]:
-    """V4 Flash gate: filter low-value articles and cross-week duplicates.
+    """Gemma 31B IT gate (OpenRouter, reasoning disabled): filter low-value
+    articles and cross-week duplicates.
 
     Also checks against last_report_section to remove articles whose content
     is already fully covered in the previous week's report.
@@ -461,21 +478,40 @@ def prefilter_articles(
 
 直接输出JSON，禁止任何思考过程文字，禁止markdown代码块：{{"keep": [{{"i": 0, "event_date": "2026-07-09"}}, {{"i": 2, "event_date": null}}], "skip": false, "skip_reason": "", "length_hint": 400}}"""
 
+    def _log_prefilter_meta(data: dict) -> None:
+        # issue #17 acceptance: intel.log must show the OR provider that
+        # served the request and the reasoning_tokens (expected 0 with
+        # reasoning disabled). usage may omit the field on some providers.
+        provider = data.get("provider", "n/a")
+        usage = data.get("usage", {})
+        reasoning_tokens = (
+            usage.get("completion_tokens_details", {}).get("reasoning_tokens", "n/a")
+            if isinstance(usage, dict) and isinstance(usage.get("completion_tokens_details"), dict)
+            else "n/a"
+        )
+        logger.info(
+            f"[{company_zh}] Prefilter LLM: provider={provider}, reasoning_tokens={reasoning_tokens}"
+        )
+
     result = call_llm_json(
-        DEEPSEEK_BASE_URL,
+        "https://openrouter.ai/api/v1/chat/completions",
         headers={
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            **OR_ATTRIBUTION_HEADERS,
         },
         json_body={
-            "model": LLM_MODEL_FLASH,
+            "model": PREFILTER_MODEL,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 4096,
             "response_format": {"type": "json_object"},
+            "reasoning": {"enabled": False},
+            "provider": PREFILTER_PROVIDER_CFG,
+            "temperature": 0,
         },
         timeout=45,
         logger=logger,
         label=f"{company_zh} Prefilter",
+        meta_cb=_log_prefilter_meta,
     )
     if result is None:
         return articles, 400, "llm_failed_passthrough"
@@ -680,7 +716,7 @@ def run_intel(recipients: list[str] | None = None, force: bool = False):
                 fetch_log[zh] = date_str
                 continue
 
-            # Prefilter: V4 Flash quality + cross-week dedup gate
+            # Prefilter: Gemma quality + cross-week dedup gate
             new_results, length_hint, prefilter_status = prefilter_articles(zh, new_results, last_week_section)
             funnel["after_prefilter"] = len(new_results)
             funnel["prefilter_status"] = prefilter_status
@@ -796,7 +832,7 @@ tags: [intelligence, china-companies]
 
 # 中国企业情报日报 {date_str}
 
-> 搜索层：Tavily (topic=general, days={SEARCH_DAYS}) + Serper News (CN) | 推理层：{LLM_MODEL_PRO} (synthesis) / {LLM_MODEL_FLASH} (prefilter) via DeepSeek API
+> 搜索层：Tavily (topic=general, days={SEARCH_DAYS}) + Serper News (CN) | 推理层：{LLM_MODEL_PRO} (synthesis, DeepSeek) / {PREFILTER_MODEL} (prefilter, OpenRouter)
 > 生成时间：{datetime.now(SGT).strftime("%Y-%m-%d %H:%M SGT")}{"（force）" if force else ""} | tokens: in={total_input} out={total_output} | ~${cost:.4f}
 {failed_note}
 {chr(10).join(sections)}

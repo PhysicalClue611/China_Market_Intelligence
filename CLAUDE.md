@@ -144,12 +144,12 @@ launchd 直接调 `~/MI/.venv/bin/python`，无 Docker，无 LLM 介入。
 | 场景 | 模型 |
 |---|---|
 | 情报主合成 | `deepseek-v4-pro` + `reasoning_effort=high`（DeepSeek 直连） |
-| Prefilter 门控 | `deepseek-v4-flash`（DeepSeek 直连） |
+| Prefilter 门控 | `google/gemma-4-31b-it`（OpenRouter，`reasoning.enabled=false`，provider Crusoe/Friendli/OpenInference，Together ignore） |
 | 邮件指令解析 / 英文名推断 | `openai/gpt-oss-20b`（OpenRouter） |
 | 情报主搜索 | Tavily `topic=general, days=8` → SerpApi → Serper |
 | 中文新闻补充 | Serper News (`/news, hl=zh-cn`) → SerpApi News (`tbm=nws`) |
 
-**OpenRouter 调用归属**（2026-07-12，`HTTP-Referer` 格式于 2026-07-13 修正，见 PITFALLS.md #25）：所有 `openrouter.ai/api/v1/chat/completions` 调用统一附加 `OR_ATTRIBUTION_HEADERS`（`HTTP-Referer: https://github.com/PhysicalClue611/China_Market_Intelligence`、`X-OpenRouter-Title: MI`），定义在各文件 `OPENROUTER_API_KEY` 常量旁，调用点用 `**OR_ATTRIBUTION_HEADERS` 合并进 headers，不手写字面量。`HTTP-Referer` 必须是合法 URL（`https://` 开头），裸字符串会被 OR 静默丢弃整个归属。调用点：`email_check.py`（3 处）、`run_intel_deepseek_test.py`（1 处）。全局约定见 `~/.claude/CLAUDE.md` "OpenRouter API 归属 Header 约定"；新增 OpenRouter 调用点时同样遵循。
+**OpenRouter 调用归属**（2026-07-12，`HTTP-Referer` 格式于 2026-07-13 修正，见 PITFALLS.md #25）：所有 `openrouter.ai/api/v1/chat/completions` 调用统一附加 `OR_ATTRIBUTION_HEADERS`（`HTTP-Referer: https://github.com/PhysicalClue611/China_Market_Intelligence`、`X-OpenRouter-Title: MI`），定义在各文件 `OPENROUTER_API_KEY` 常量旁，调用点用 `**OR_ATTRIBUTION_HEADERS` 合并进 headers，不手写字面量。`HTTP-Referer` 必须是合法 URL（`https://` 开头），裸字符串会被 OR 静默丢弃整个归属。调用点：`email_check.py`（3 处）、`run_intel.py`（1 处，prefilter）、`run_intel_deepseek_test.py`（1 处）。全局约定见 `~/.claude/CLAUDE.md` "OpenRouter API 归属 Header 约定"；新增 OpenRouter 调用点时同样遵循。
 
 **要求 JSON 输出的调用一律加 `response_format: {"type": "json_object"}`**（2026-07-19，见 PITFALLS.md #29）：DeepSeek 直连和 OpenRouter（含 `openai/gpt-oss-20b` 走 5-provider 池）均已用真实请求验证支持，返回 200 且输出为干净 JSON。从 API 层面约束输出格式，比事后解析更治本；新增任何"prompt 要求模型只输出 JSON"的调用点都应带上这个参数，不要只依赖 prompt 里的文字约束。取值/解析统一走 `http_utils.call_llm_json()`（内置重试+诊断日志，见上表 `http_utils.py` 行），不要在调用点各自手写。
 
@@ -195,7 +195,7 @@ Obsidian 输出：`Paperview/Hermes/MI/YYYY-MM-DD-china-companies.md`
 
 ## 踩过的坑
 
-详细踩坑记录（29 条，含具体报错、修复代码、教训）已拆到 **`PITFALLS.md`**（同目录）。排查 bug、判断某类故障是否已知、或改动前想确认"这里以前踩过坑没有"时读取该文件。本文件只保留最近几条的一句话索引，完整上下文一律看 `PITFALLS.md`：
+详细踩坑记录（31 条，含具体报错、修复代码、教训）已拆到 **`PITFALLS.md`**（同目录）。排查 bug、判断某类故障是否已知、或改动前想确认"这里以前踩过坑没有"时读取该文件。本文件只保留最近几条的一句话索引，完整上下文一律看 `PITFALLS.md`：
 
 - #24 无日期转载文章绕过时效过滤 → 一年前旧财报被写成"本周新动态"（已修复，issue #12）
 - #25 OpenRouter `HTTP-Referer` 用裸字符串非 URL → 归属 header 静默失效（已修复 2026-07-13）
@@ -203,6 +203,8 @@ Obsidian 输出：`Paperview/Hermes/MI/YYYY-MM-DD-china-companies.md`
 - #27 Slack/email 先标记已处理后发送回复 + run_intel/slack_check 缺关键 env 仍 exit 0（已修复 2026-07-15，issue #8/#9/#11）
 - #28 `prefilter_articles()` 漏 `reasoning_content` 兜底 → content=null 时门控静默 pass-through（已修复 2026-07-15，issue #10）
 - #29 徐工年份错位事故：`json.loads` 无法区分"真空"与"格式错误"+ 手写重试补丁在 3 处调用点各自漏了 try/except 保护 → 引入 4 个新 bug，最终收敛为共享 `call_llm_json()` + `response_format=json_object`（已修复 2026-07-19）
+- #30 iCloud scandir EINTR 打断周任务 → 整周报告静默缺失；glob 重试 + 公司循环隔离 + 全家失败 raise（已修复 2026-09-01，issue #15）
+- #31 Flash 做结构化门控未关 thinking → 李宁 2 篇被原样回显成 JSON 数组、整层门控 pass-through；prefilter 换 OR `google/gemma-4-31b-it` + reasoning off（已修复 2026-09-01，issue #17）
 
 ---
 
@@ -213,6 +215,6 @@ Obsidian 输出：`Paperview/Hermes/MI/YYYY-MM-DD-china-companies.md`
 | 日期过滤 | `_parse_pub_date()`，多格式，> 9天丢弃 | 运行中 |
 | L1 URL | `seen_urls.json` 90天TTL | 运行中 |
 | L2 标题 Jaccard | `article_cache.json`，阈值 0.45 | 运行中 |
-| L2.5 V4 Flash | 时效/相关性/跨周去重/信息量/事件日期抽取，max_tokens=4096，`response_format=json_object` | 运行中 |
-| 事件日期硬过滤 | `EVENT_MAX_AGE_DAYS=30`，对 V4 Flash 抽取的 event_date 做确定性丢弃，不信任模型自己的 keep 判断 | 运行中 |
+| L2.5 Gemma 31B IT（OR, reasoning off） | 时效/相关性/跨周去重/信息量/事件日期抽取，max_tokens=4096，`response_format=json_object` | 运行中 |
+| 事件日期硬过滤 | `EVENT_MAX_AGE_DAYS=30`，对 prefilter 抽取的 event_date 做确定性丢弃，不信任模型自己的 keep 判断 | 运行中 |
 | L3 MemPalace 语义 | 待积累 3 月以上数据后启用 | 未启用 |

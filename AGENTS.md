@@ -58,7 +58,7 @@ launchd 直接调 `~/MI/.venv/bin/python`，无 Docker，无 LLM 介入。
 
 | 变量 | 用途 |
 |---|---|
-| `OPENROUTER_API_KEY` | LLM 调用（DeepSeek V4 Flash） |
+| `OPENROUTER_API_KEY` | LLM 调用（prefilter 门控走 OpenRouter Gemma，reasoning off） |
 | `TAVILY_API_KEY` | 情报抓取（主力，10次/日） |
 | `SERPAPI_API_KEY` | Tavily 配额耗尽后备用（250次/月） |
 | `SERPER_API_KEY` | 三级 fallback |
@@ -89,7 +89,7 @@ launchd 直接调 `~/MI/.venv/bin/python`，无 Docker，无 LLM 介入。
 
 | 场景 | 模型 |
 |---|---|
-| 情报文本分析 | `deepseek/deepseek-v4-flash`（via OpenRouter） |
+| Prefilter 门控 | `google/gemma-4-31b-it`（OpenRouter，reasoning off，provider Crusoe/Friendli/OpenInference） |
 | 邮件指令解析 / 英文名推断 | `openai/gpt-oss-20b` |
 | 情报抓取 | Tavily `topic=general, days=30` |
 
@@ -154,5 +154,5 @@ DeepSeek V4 Flash 在 prefilter 阶段偶尔返回空响应（`Expecting value: 
 |---|---|---|
 | L1 URL | `seen_urls.json` 90天TTL | 运行中 |
 | L2 标题 Jaccard | `article_cache.json`，阈值 0.45 | 运行中 |
-| L2.5 V4 Flash 预处理门控 | 时效/相关性/信息量过滤 | 运行中 |
+| L2.5 Gemma 31B IT 预处理门控 | 时效/相关性/信息量过滤（OR，reasoning off） | 运行中 |
 | L3 MemPalace 语义 | 待积累 2-3 月数据后启用 | 未启用 |

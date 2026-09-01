@@ -161,3 +161,18 @@ issue #5/#6/#7（踩坑 #20-23）修过的两类模式在其余入口原样存�
 - **云盘/文件系统 I/O 的枚举调用（`Path.glob`/`os.scandir`/`os.walk`）可能被信号打断且不自动重试**——iCloud/网络盘这类 file provider 场景下，单次枚举失败既可能是真故障也可能是瞬时 EINTR，宁可短重试后降级（返回空/`None`），不要让一次枚举把整轮任务打死；降级路径要和同一函数里既有的失败降级（如 `read_text` 返回 `""`）对齐。
 - **catch 之后 exit 0 的静默成功是这类调度系统最危险的模式**（#20/#22/#27 同族第 5 次出现）：任何「某环节失败但进程仍正常退出」的路径，都会让 launchd 判定成功、巡检找不到异常、周报通道静默缺失整周——隔离单家失败时，必须同时堵住「全家都失败却发『无新情报』成功通知」这条对外通道。
 - **终态信号必须准确**：`RuntimeError` 消息写死 "all companies failed" 会把「1 家失败 + 5 家正常无情报」误报成全家失败，误导巡检/人工排障——异常消息/日志/成功串这类终态信号要报实际计数，别用写死的措辞。
+
+### 31. Flash 做结构化门控未关 thinking：两次把文章列表原样打成 JSON 数组 → 整层门控 pass-through（已修复 2026-09-01，issue #17）
+2026-08-31 22:27 生产日志：李宁 2 篇文章进 prefilter（DeepSeek V4 Flash 直连、未关 thinking），Flash 两次把输入文章列表原样回显成 JSON **数组**，`call_llm_json` 解析出 non-dict list 重试两次后返回 `None`，FUNNEL `prefilter_status=llm_failed_passthrough`，2 篇全部未过滤进 V4 Pro。这是"推理模型做零推理结构化任务"的典型翻车：Flash 是 reasoning 模型，默认 thinking on，结构化门控（时效/相关性/跨周去重/信息量/`event_date` 抽取）不需要思考链，thinking 反而既费 output 预算又引入格式抖动（同题探针 reasoning_tokens=3022，reasoning 正文 6106 字，而最终答案只有 43 token）。与 Homepage 题库文档 `Hermes/Homepage/LLM-No-Reasoning-eval设计与实现` 的硬原则冲突：零推理任务默认关 reasoning；关了仍做不对就换模型，不要开 reasoning 补洞。
+
+**修复**：prefilter 这一跳整体切换到 OpenRouter `google/gemma-4-31b-it` + `"reasoning": {"enabled": False}`：
+- 请求体最小集：`model`、`messages`（prompt 文案保持现有中文门控不动）、`max_tokens=4096`、`response_format: json_object`、`reasoning.enabled=false`、`temperature=0`、`provider: {"order": ["Crusoe","Friendli","OpenInference"], "ignore": ["Together"], "allow_fallbacks": false}`。
+- Provider 选择依据：该模型 reasoning off 下三家首选 100% 合规；Together 在该模型上关 reasoning 仍有约 67% 泄漏，必须 ignore，不放进 fallback。`allow_fallbacks=false`：三家首选全不可达时走 pass-through，不落到未验证后端（评审修正，原草案 `true` 与"不换未验证模型"条款矛盾）。不要锁量化（Portfonia 锁 OpenInference/bf16 曾导致大输入延迟事故）。
+- Header 与 `email_check.py` 相同的 `OR_ATTRIBUTION_HEADERS`；`run_intel.py` 新增自己的 `OPENROUTER_API_KEY` + `OR_ATTRIBUTION_HEADERS` 常量，`_validate_intel_config()` 增加 `OPENROUTER_API_KEY`（prefilter 变硬依赖；`DEEPSEEK_API_KEY` 仍要，Pro 合成还在直连）。
+- 失败语义保持不变：网络失败/非 dict/空 content → `call_llm_json` 返回 `None` → `(articles, 400, "llm_failed_passthrough")`；`skip=true` → 空列表 `status=ok`；`EVENT_MAX_AGE_DAYS=30` 事件日期硬过滤仍在 Python 侧。不为"模型爱吐数组"放宽 `call_llm_json` 接受 list。
+- 可观测性：`call_llm_json` 新增可选 `meta_cb`（成功解析后收到完整响应），prefilter 用它把 OR provider 名与 `usage.completion_tokens_details.reasoning_tokens` 写进 intel.log（issue 验收点"日志能看到 OR provider 名、reasoning_tokens 应为 0"；`reasoning_tokens` 字段不存在时记 `n/a`）。其他调用点不传 `meta_cb`，行为不变。
+- 常量 `LLM_MODEL_FLASH` 改名 `PREFILTER_MODEL`，报告 footer 不再写「Flash via DeepSeek API」。
+
+**验证**（2026-09-01 真人对照 + 本机探针）：李宁 08-31 两篇（Media OutReach + Perplexity）Gemma 返回对象 `keep[0,1]`、`event_date` 2026-08-20/2026-08-27、Crusoe、`reasoning_tokens=0`、completion 72；Flash 同题 reasoning_tokens=3022。题库 NR-01 锻升重工 GT `{0,3}` 命中。单测覆盖：请求体（model/reasoning/provider/attribution header）、合法 keep 过滤行为、JSON 数组 → pass-through、缺 `OPENROUTER_API_KEY` → `IntelConfigError`、`meta_cb` 收到 provider/usage。
+
+**教训**：结构化门控这类零推理任务，选模型的第一标准是"能否关掉 reasoning 且格式稳定"，不是"同模型族的推理能力强不强"；生产上同一模型在 thinking on 与 off 之间可能输出形状完全不同的东西（对象 vs 数组），且 thinking token 白付全价 output 费用。换模型前先查该模型在目标 provider 上 reasoning off 是否真的生效（用 `usage.completion_tokens_details.reasoning_tokens == 0` 验证），不能只看模型名。
