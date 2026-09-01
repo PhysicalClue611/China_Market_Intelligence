@@ -7,10 +7,12 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 import json
 import logging
 import os
+import errno
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import re
+import time
 
 import httpx
 
@@ -57,6 +59,9 @@ JINA_BASE_URL = "https://r.jina.ai"
 SEEN_URLS_PATH = DATA_DIR / "seen_urls.json"
 FETCH_LOG_PATH = DATA_DIR / "fetch_log.json"
 SEEN_URL_TTL_DAYS = 90
+
+EINTR_MAX_ATTEMPTS = 4     # iCloud scandir EINTR retries before degrading (issue #15)
+EINTR_RETRY_SLEEP = 0.1    # seconds between retries
 
 LLM_MODEL_FLASH = "deepseek-v4-flash"   # prefilter gate
 LLM_MODEL_PRO   = "deepseek-v4-pro"     # final synthesis
@@ -145,6 +150,31 @@ def _is_stale(title: str) -> bool:
 
 # ── Last report section loader ─────────────────────────────────────────────────
 
+def _glob_report_files(report_dir: Path) -> list | None:
+    """Sorted glob of *-china-companies.md, retrying transient EINTR.
+
+    The Obsidian vault lives on iCloud Drive; the file provider can interrupt
+    os.scandir mid-iteration, which CPython's Path.glob surfaces as
+    InterruptedError (issue #15). Returns None when retries are exhausted so
+    the caller can degrade instead of killing the whole run.
+    """
+    for attempt in range(1, EINTR_MAX_ATTEMPTS + 1):
+        try:
+            return sorted(report_dir.glob("*-china-companies.md"), reverse=True)
+        except InterruptedError:
+            pass
+        except OSError as e:
+            if e.errno != errno.EINTR:
+                raise
+        logger.warning(
+            "Report dir glob interrupted (EINTR), attempt %d/%d: %s",
+            attempt, EINTR_MAX_ATTEMPTS, report_dir,
+        )
+        if attempt < EINTR_MAX_ATTEMPTS:
+            time.sleep(EINTR_RETRY_SLEEP)
+    return None
+
+
 def load_last_report_section(company_zh: str) -> str:
     """Extract company_zh's section from the most recent previous weekly report.
     Returns "" if no previous report or company not found.
@@ -152,7 +182,14 @@ def load_last_report_section(company_zh: str) -> str:
     report_dir = OBSIDIAN_DIR / "Hermes" / "MI"
     today = datetime.now().strftime("%Y-%m-%d")
 
-    reports = sorted(report_dir.glob("*-china-companies.md"), reverse=True)
+    reports = _glob_report_files(report_dir)
+    if reports is None:
+        logger.error(
+            "[%s] Report dir glob failed after %d attempts (EINTR), "
+            "skipping cross-week dedup",
+            company_zh, EINTR_MAX_ATTEMPTS,
+        )
+        return ""
     target = None
     for r in reports:
         # stem is e.g. "2026-05-17-china-companies"
@@ -598,99 +635,105 @@ def run_intel(recipients: list[str] | None = None, force: bool = False):
             logger.info(f"[{zh}] Already fetched today, skipping")
             continue
 
-        # Load previous week's report section for cross-week dedup
-        last_week_section = load_last_report_section(zh) if not force else ""
-        if last_week_section:
-            logger.info(f"[{zh}] Last report section loaded ({len(last_week_section)} chars)")
+        try:
+            # Load previous week's report section for cross-week dedup
+            last_week_section = load_last_report_section(zh) if not force else ""
+            if last_week_section:
+                logger.info(f"[{zh}] Last report section loaded ({len(last_week_section)} chars)")
 
-        # Snapshot historical cache BEFORE fetch to avoid same-batch mutual L2 drops
-        historical_cache = get_articles_by_company(zh) if not force else []
-        logger.info(f"[{zh}] Fetching news...")
-        raw_results, funnel = fetch_company_raw(company)
-        if raw_results is None:
-            logger.warning(f"[{zh}] Search provider failed, skipping (will retry next run)")
+            # Snapshot historical cache BEFORE fetch to avoid same-batch mutual L2 drops
+            historical_cache = get_articles_by_company(zh) if not force else []
+            logger.info(f"[{zh}] Fetching news...")
+            raw_results, funnel = fetch_company_raw(company)
+            if raw_results is None:
+                logger.warning(f"[{zh}] Search provider failed, skipping (will retry next run)")
+                logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
+                continue
+
+            if not force:
+                new_results = [r for r in raw_results if r["url"] not in seen_urls]
+            else:
+                new_results = raw_results
+            funnel["after_l1"] = len(new_results)
+
+            # L2: title Jaccard similarity — catches same story at a different URL
+            if not force and new_results:
+                l2_kept, l2_skipped = [], 0
+                for r in new_results:
+                    is_dup, score, match = find_cache_duplicate(r["url"], r["title"], historical_cache)
+                    if is_dup:
+                        logger.info(f"[{zh}] L2 dedup: '{r['title'][:55]}' "
+                                    f"(j={score:.2f} ← '{match[:40]}')")
+                        l2_skipped += 1
+                    else:
+                        l2_kept.append(r)
+                if l2_skipped:
+                    logger.info(f"[{zh}] L2 title dedup: {len(new_results)} → {len(l2_kept)} "
+                                f"({l2_skipped} removed)")
+                new_results = l2_kept
+            funnel["after_l2"] = len(new_results)
+
+            if not new_results:
+                logger.info(f"[{zh}] No new URLs after dedup, skipping section")
+                logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
+                fetch_log[zh] = date_str
+                continue
+
+            # Prefilter: V4 Flash quality + cross-week dedup gate
+            new_results, length_hint, prefilter_status = prefilter_articles(zh, new_results, last_week_section)
+            funnel["after_prefilter"] = len(new_results)
+            funnel["prefilter_status"] = prefilter_status
+            if not new_results:
+                logger.info(f"[{zh}] Prefilter: no actionable intel, skipping section")
+                logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
+                fetch_log[zh] = date_str
+                continue
+
+            logger.info(f"[{zh}] {len(new_results)} articles after prefilter, synthesizing with V4 Pro...")
+            new_context = "\n\n---\n\n".join(
+                f"标题：{r['title']}\n内容：{r['content']}\n来源：{r['url']}"
+                for r in new_results
+            )
+            # Historical cache context (background only, not primary source)
+            new_urls = {r["url"] for r in new_results}
+            historical = [a for a in get_articles_by_company(zh) if a["url"] not in new_urls]
+            historical_context = "\n\n---\n\n".join(
+                f"标题：{a['title']}\n内容：{a['content'][:300]}\n来源：{a['url']}"
+                for a in historical[:8]
+            )
+            # Personal knowledge base: MemPalace + Obsidian
+            kb_context = get_company_context(zh, company.get("en", ""))
+            if kb_context:
+                logger.info(f"[{zh}] KB context: {len(kb_context)} chars injected")
+
+            summary, usage = synthesize_with_llm(
+                zh, new_context, historical_context, kb_context,
+                last_week_section=last_week_section,
+                length_hint=length_hint,
+            )
+            if summary is None:
+                logger.warning(f"[{zh}] LLM synthesis failed after retries, skipping section")
+                logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
+                continue
+
+            in_t = usage.get("prompt_tokens", 0)
+            out_t = usage.get("completion_tokens", 0)
+            total_input += in_t
+            total_output += out_t
+            logger.info(f"[{zh}] tokens: in={in_t} out={out_t}")
             logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
+            sections.append(f"## {zh}\n\n{summary}\n\n---")
+
+            if not force:
+                ts = datetime.now().timestamp()
+                for r in new_results:
+                    seen_urls[r["url"]] = {"ts": ts, "company": zh}
+                fetch_log[zh] = date_str
+        except IntelConfigError:
+            raise  # 部署/配置错误逃到 __main__ 非零退出，不当单公司瞬时故障吞掉（issue #15）
+        except Exception:
+            logger.exception(f"[{zh}] Unexpected error processing company, skipping")
             continue
-
-        if not force:
-            new_results = [r for r in raw_results if r["url"] not in seen_urls]
-        else:
-            new_results = raw_results
-        funnel["after_l1"] = len(new_results)
-
-        # L2: title Jaccard similarity — catches same story at a different URL
-        if not force and new_results:
-            l2_kept, l2_skipped = [], 0
-            for r in new_results:
-                is_dup, score, match = find_cache_duplicate(r["url"], r["title"], historical_cache)
-                if is_dup:
-                    logger.info(f"[{zh}] L2 dedup: '{r['title'][:55]}' "
-                                f"(j={score:.2f} ← '{match[:40]}')")
-                    l2_skipped += 1
-                else:
-                    l2_kept.append(r)
-            if l2_skipped:
-                logger.info(f"[{zh}] L2 title dedup: {len(new_results)} → {len(l2_kept)} "
-                            f"({l2_skipped} removed)")
-            new_results = l2_kept
-        funnel["after_l2"] = len(new_results)
-
-        if not new_results:
-            logger.info(f"[{zh}] No new URLs after dedup, skipping section")
-            logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
-            fetch_log[zh] = date_str
-            continue
-
-        # Prefilter: V4 Flash quality + cross-week dedup gate
-        new_results, length_hint, prefilter_status = prefilter_articles(zh, new_results, last_week_section)
-        funnel["after_prefilter"] = len(new_results)
-        funnel["prefilter_status"] = prefilter_status
-        if not new_results:
-            logger.info(f"[{zh}] Prefilter: no actionable intel, skipping section")
-            logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
-            fetch_log[zh] = date_str
-            continue
-
-        logger.info(f"[{zh}] {len(new_results)} articles after prefilter, synthesizing with V4 Pro...")
-        new_context = "\n\n---\n\n".join(
-            f"标题：{r['title']}\n内容：{r['content']}\n来源：{r['url']}"
-            for r in new_results
-        )
-        # Historical cache context (background only, not primary source)
-        new_urls = {r["url"] for r in new_results}
-        historical = [a for a in get_articles_by_company(zh) if a["url"] not in new_urls]
-        historical_context = "\n\n---\n\n".join(
-            f"标题：{a['title']}\n内容：{a['content'][:300]}\n来源：{a['url']}"
-            for a in historical[:8]
-        )
-        # Personal knowledge base: MemPalace + Obsidian
-        kb_context = get_company_context(zh, company.get("en", ""))
-        if kb_context:
-            logger.info(f"[{zh}] KB context: {len(kb_context)} chars injected")
-
-        summary, usage = synthesize_with_llm(
-            zh, new_context, historical_context, kb_context,
-            last_week_section=last_week_section,
-            length_hint=length_hint,
-        )
-        if summary is None:
-            logger.warning(f"[{zh}] LLM synthesis failed after retries, skipping section")
-            logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
-            continue
-
-        in_t = usage.get("prompt_tokens", 0)
-        out_t = usage.get("completion_tokens", 0)
-        total_input += in_t
-        total_output += out_t
-        logger.info(f"[{zh}] tokens: in={in_t} out={out_t}")
-        logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
-        sections.append(f"## {zh}\n\n{summary}\n\n---")
-
-        if not force:
-            ts = datetime.now().timestamp()
-            for r in new_results:
-                seen_urls[r["url"]] = {"ts": ts, "company": zh}
-            fetch_log[zh] = date_str
 
     if not force:
         _save_seen_urls(seen_urls)
