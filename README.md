@@ -52,7 +52,8 @@ All keys go in a `.env` file at the project root (copy `.env.example` as a start
 
 | Variable | Service | Purpose |
 |---|---|---|
-| `DEEPSEEK_API_KEY` | [DeepSeek Platform](https://platform.deepseek.com) | Primary LLM for synthesis and prefilter |
+| `DEEPSEEK_API_KEY` | [DeepSeek Platform](https://platform.deepseek.com) | Synthesis LLM (V4 Pro, direct API) |
+| `OPENROUTER_API_KEY` | [OpenRouter](https://openrouter.ai) | Prefilter gate (Gemma 4 31B IT) and email command parsing |
 | `TAVILY_API_KEY` | [Tavily](https://tavily.com) | Primary news search (10 req/day on free tier) |
 | `RESEND_API_KEY` | [Resend](https://resend.com) | Outbound email delivery |
 | `FROM_ADDRESS` | — | Sender address for outbound email (e.g. `mi@yourdomain.com`) |
