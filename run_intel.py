@@ -749,8 +749,10 @@ def run_intel(recipients: list[str] | None = None, force: bool = False):
                 len(failed_companies), len(companies), ", ".join(failed_companies),
             )
             raise RuntimeError(
-                "run_intel: all companies failed with errors "
-                f"({', '.join(failed_companies)}) — no sections produced"
+                "run_intel: "
+                f"{len(failed_companies)}/{len(companies)} companies failed "
+                f"with errors ({', '.join(failed_companies)}) — "
+                "no sections produced, not sending 'no new intel'"
             )
         logger.info("No new intel for any company — sending notification email.")
         sid = send_report(

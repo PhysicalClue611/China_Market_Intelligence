@@ -150,15 +150,21 @@ def test_company_loop_isolates_per_company_error():
         post_slack_report=lambda b: None,
         get_footer=lambda: "",
     ), mock.patch.object(run_intel.logger, "exception") as m_exc:
+        raised = None
         try:
             run_intel.run_intel()
-        except RuntimeError:
-            pass  # all companies skipped -> must raise, not fake "no new intel" success
+        except RuntimeError as e:
+            raised = e
         else:
-            raise AssertionError("expected RuntimeError when every company is skipped")
+            raise AssertionError("expected RuntimeError when no sections and failures exist")
 
     assert fetch_calls == [{"zh": "公司乙"}], f"expected only later company to reach fetch, got {fetch_calls!r}"
     m_exc.assert_called_once()
+    assert raised is not None
+    msg = str(raised)
+    assert "1/2 companies failed" in msg, f"message must report partial failure, got: {msg!r}"
+    assert "公司甲" in msg
+    assert "all companies failed" not in msg
     print("[PASS] company loop: unexpected per-company error logged + skipped, later company still runs")
 
 
@@ -214,14 +220,19 @@ def test_run_all_companies_error_no_false_success():
         get_footer=lambda: "",
     ), mock.patch.object(run_intel.logger, "info") as m_info, \
        mock.patch.object(run_intel.logger, "exception") as m_exc:
+        raised = None
         try:
             run_intel.run_intel()
-        except RuntimeError:
-            pass
+        except RuntimeError as e:
+            raised = e
         else:
             raise AssertionError("expected RuntimeError when all companies fail")
 
     m_exc.assert_called()
+    assert raised is not None
+    msg = str(raised)
+    assert "2/2 companies failed" in msg, f"message must report the failure count, got: {msg!r}"
+    assert "公司甲" in msg and "公司乙" in msg
     assert not any("No new intel" in str(call) for call in m_info.call_args_list), \
         "'No new intel' must not be logged when every company failed"
     print("[PASS] all companies error -> raises, no 'no new intel' success notification")
