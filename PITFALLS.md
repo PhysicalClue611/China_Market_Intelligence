@@ -141,3 +141,23 @@ issue #5/#6/#7（踩坑 #20-23）修过的两类模式在其余入口原样存�
 - **有官方的输出约束参数（如 `response_format: json_object`）时，应优先用它把问题解决在源头**，而不是只在下游把解析器和重试逻辑做得更鲁棒——后者永远是"降低概率"，前者才是"消除大部分同类故障"；两者不互斥，但下游防御不能替代上游约束。
 
 **追加修复（2026-07-20，issue #14，另一 LLM 审核发现）**：`call_llm_json()` 的保护范围本身仍不完整——`data["choices"][0]["message"]` 这一步的**索引**被 try/except 保护了（`KeyError`/`IndexError`/`TypeError`），但取出来的 `message` 值如果本身不是 dict（`None`、字符串、列表——索引操作不报错，只是拿到一个非预期类型的值），紧接着的 `raw = extract_llm_text(message)` 在保护范围外，`extract_llm_text` 内部调用 `msg.get(...)` 对非 dict 值直接抛 `AttributeError`，未捕获，逃出 `call_llm_json`，复现的正是 #13/#29 本身想根治的"API 返回 200 但响应形状异常"这一类故障，只是触发条件从"缺字段"换成了"字段值类型不对"。用 issue 里给的复现代码（`message=None`）实测确认崩溃，修复后追加 `isinstance(message, dict)` 校验，非 dict 时按"这次尝试失败"处理（记录类型和值，进入重试循环），补充验证了 `None`/字符串/列表三种畸形值以及原有正常路径不受影响。**教训**：修一类"响应形状异常"的漏洞时，"索引安全"和"值类型安全"是两件必须分别检查的事，只做前者不能替代后者——这次的漏网正是当时 `/code-review` 的 8 个角度都没有专门覆盖"索引成功但值类型错误"这一种子情形，被另一个独立的 LLM 审核在事后补上。
+
+### 30. iCloud scandir EINTR 打断周任务，整周报告静默缺失（已修复 2026-09-01，issue #15）
+2026-08-30 08:59 PDT `com.hermes.intel` **准时触发**（`intel.log`：`Starting intelligence pull`），不是没跑。TCL、海尔两家跑完后，第三家（安踏）`load_last_report_section()` 对 iCloud vault 目录（`~/Library/Mobile Documents/iCloud~md~obsidian/.../Paperview/Hermes/MI`）执行 `glob("*-china-companies.md")` 时 `os.scandir` 抛 `InterruptedError: [Errno 4] Interrupted system call`，异常逃出 `for company in companies` 循环，进程 exit 1。launchd `StartCalendarInterval` **不补跑**，成功字符串从未写出；巡检 2026-09-01 报"预期 08-30 后未见成功日志（已 37h）"。周报未写入 Obsidian，邮件/Telegram/Slack 均未发送，下次自然触发要等 09-06。同一次运行里 TCL/海尔的 glob 已成功（分别加载 277/270 chars）——瞬时 EINTR，不是路径不存在。
+
+**根因三层叠加**：
+1. **直接原因**：Obsidian vault 在 iCloud Drive（`Mobile Documents`）。file provider 可能在 `scandir` 期间投递信号，`os.scandir` 返回 EINTR；CPython `Path.glob` 不重试，升为 `InterruptedError`。
+2. **未隔离**：`glob` 在 `load_last_report_section` 里、`read_text` 的 `try/except` **之外**。同一函数对读文件已降级返回 `""`，列目录没有对等处理。
+3. **调度放大**：周历任务失败不重试；巡检只扫终态成功日志，把「中途崩溃」显示成「没跑」。
+
+**修复（PR #16，commit d71e27b）**：
+- `run_intel.py` 新增 `_glob_report_files(report_dir)`：对 `InterruptedError`（及 `errno==EINTR` 的 `OSError`）重试 4 次、间隔 100ms，耗尽返回 `None`；非 EINTR 的 `OSError` 原样上抛。
+- `load_last_report_section`：`None` 时记 ERROR 并返回 `""`（本家不做跨周去重注入，优于六家全灭），与既有 `read_text` 失败降级一致。
+- 公司循环隔离：`for company in companies` 主体包进 `try/except`，单家瞬时 OS 错误 `logger.exception` + `continue`；`IntelConfigError` 仍逃逸到 `__main__` 非零退出。
+- **review 追加（防止静默成功）**：循环内记 `failed_companies`。若无 sections 且存在失败公司：不再走「本周无新情报」成功通知（该路径会发邮件/Telegram/Slack 并留下巡检要找的成功串），改为 `logger.error` + `raise RuntimeError`（消息带 `{n}/{total} companies failed` 实际计数），`__main__` 非零退出；部分失败时仍发送成功公司的报告，但邮件标题/正文与 Telegram 通知写明跳过公司。
+- 新增 `test_eintr_retry.py` 12 项（mock `Path.glob`/helper）：EINTR 重试成功、耗尽返回 None、非 EINTR 上抛、降级返回 `""`、成功路径不变、循环隔离、全家失败不发成功通知、部分失败点名跳过公司、`IntelConfigError` 传播。
+
+**教训**：
+- **云盘/文件系统 I/O 的枚举调用（`Path.glob`/`os.scandir`/`os.walk`）可能被信号打断且不自动重试**——iCloud/网络盘这类 file provider 场景下，单次枚举失败既可能是真故障也可能是瞬时 EINTR，宁可短重试后降级（返回空/`None`），不要让一次枚举把整轮任务打死；降级路径要和同一函数里既有的失败降级（如 `read_text` 返回 `""`）对齐。
+- **catch 之后 exit 0 的静默成功是这类调度系统最危险的模式**（#20/#22/#27 同族第 5 次出现）：任何「某环节失败但进程仍正常退出」的路径，都会让 launchd 判定成功、巡检找不到异常、周报通道静默缺失整周——隔离单家失败时，必须同时堵住「全家都失败却发『无新情报』成功通知」这条对外通道。
+- **终态信号必须准确**：`RuntimeError` 消息写死 "all companies failed" 会把「1 家失败 + 5 家正常无情报」误报成全家失败，误导巡检/人工排障——异常消息/日志/成功串这类终态信号要报实际计数，别用写死的措辞。
