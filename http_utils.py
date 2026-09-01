@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import time
+from typing import Callable
 
 import httpx
 
@@ -72,7 +73,8 @@ def extract_llm_text(msg: dict) -> str:
 
 def call_llm_json(url: str, *, headers: dict, json_body: dict, timeout: float,
                   logger: "logging.Logger | None" = None, label: str = "LLM",
-                  max_attempts: int = 2) -> dict | None:
+                  max_attempts: int = 2,
+                  meta_cb: "Callable[[dict], None] | None" = None) -> dict | None:
     """POST url and parse a JSON object out of the response, retrying up to
     max_attempts times on a bad-output response (missing/malformed response
     shape, empty content, unparseable JSON, or JSON that isn't an object).
@@ -82,6 +84,15 @@ def call_llm_json(url: str, *, headers: dict, json_body: dict, timeout: float,
     several already-failed HTTP attempts is unlikely to help and would
     double the worst-case latency for a case that already spent its retry
     budget one layer down.
+
+    meta_cb, if given, is called with the full parsed response dict right
+    before returning a successful result — callers use it to log provider /
+    usage fields (e.g. OR provider name, reasoning_tokens) that the parsed
+    result itself doesn't carry. It is only invoked on success; on failure
+    the caller gets None and sees no meta. An exception raised by meta_cb
+    is caught and logged — a logging callback must never turn a successful
+    LLM parse into a failure (which would degrade the caller's whole
+    pipeline via its pass-through path).
 
     Returns the parsed dict, or None if every attempt failed — callers
     should apply their own fallback value; this function only logs the
@@ -120,6 +131,12 @@ def call_llm_json(url: str, *, headers: dict, json_body: dict, timeout: float,
             if logger:
                 logger.warning(f"[{label}] LLM JSON parsed to non-dict {type(result).__name__} (attempt {attempt}/{max_attempts}): {result!r}")
             continue
+        if meta_cb is not None:
+            try:
+                meta_cb(data)
+            except Exception as e:
+                if logger:
+                    logger.warning(f"[{label}] meta_cb failed (result still returned): {e}")
         return result
     return None
 
