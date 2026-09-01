@@ -2,7 +2,7 @@
 
 这是 `~/MI` 的项目记忆文件。在这个目录下启动的 Claude Code 会话会自动读取它。
 
-## 当前系统状态（2026-06-12）
+## 当前系统状态（2026-09-01）
 
 **已从 Hermes 容器完全迁出，宿主机原生运行。** 2026-05-04 验证通过。
 
@@ -12,15 +12,19 @@
 
 **KG 写入/检索机制已移除（2026-06-12）**：bridge 上 `/mempalace/kg/add_triple`、`/mempalace/kg/query` 两个端点已下线。`kg_extractor.py` 已删除，`run_intel.py` 不再调用三元组提取；`memory_context.py` 不再查询 KG 关系（仅保留 MemPalace 语义搜索 + Obsidian 全文搜索两路）。`~/.hermes/kg_vocab/` 词表未启用，未创建。
 
+**周任务 EINTR 防护（2026-09-01，issue #15）**：iCloud vault `glob` 遇 `InterruptedError` 短重试；公司循环隔离瞬时 OS 错误；全家失败且无 sections 则非零退出，不发「无新情报」。见 PITFALLS.md #30。
+
+**Prefilter 已换模型（2026-09-01，issue #17）**：门控不再走 DeepSeek V4 Flash（直连、未关 thinking）。现为 OpenRouter `google/gemma-4-31b-it` + `reasoning.enabled=false`，provider Crusoe/Friendli/OpenInference、ignore Together、`allow_fallbacks=false`。合成仍是 V4 Pro 直连。见 PITFALLS.md #31。
+
 ---
 
 ## 项目文档
 
 | 文件 | 用途 | 操作规则 |
 |------|------|---------|
-| `~/MI/PITFALLS.md` | 详细踩坑记录（29 条，报错原文/修复代码/教训），从本文件拆出以控制体积 | 每次修复新故障后追加新条目到文件末尾；排查 bug 前先读 |
+| `~/MI/PITFALLS.md` | 详细踩坑记录（31 条，报错原文/修复代码/教训），从本文件拆出以控制体积 | 每次修复新故障后追加新条目到文件末尾；排查 bug 前先读 |
 | `Hermes/MI/Hermes_MI设计文档.md`（Obsidian） | 系统架构设计文档，面向独立实现者，描述当前状态 | 架构/配置/模型选型变更时同步更新；"更新文档"指令必写 |
-| `Hermes/MI/Hermes_MI开发日志.md`（Obsidian） | 开发决策与踩坑记录，条目从新到旧 | 每次重要变更后追加新条目；"更新文档"指令必写 |
+| `Hermes/MI/Hermes_MI开发日志.md`（Obsidian） | 开发决策与踩坑记录，早的在前、晚的在后 | 每次重要变更后 append 到文件末尾；"更新文档"指令必写 |
 
 新 session 启动时如涉及代码或架构讨论，应读取设计文档作为背景；涉及 bug 排查或改动前想确认"这里以前踩过坑没有"，读 `PITFALLS.md`。"更新文档"时三个文件均须更新（`PITFALLS.md` 只在有新踩坑时追加）。
 
@@ -81,7 +85,7 @@ launchd 直接调 `~/MI/.venv/bin/python`，无 Docker，无 LLM 介入。
 
 | 变量 | 用途 |
 |---|---|
-| `OPENROUTER_API_KEY` | LLM 调用（DeepSeek V4 Flash） |
+| `OPENROUTER_API_KEY` | LLM 调用（prefilter：Gemma 31B IT；邮件指令：gpt-oss-20b） |
 | `TAVILY_API_KEY` | 情报抓取（主力，10次/日） |
 | `SERPAPI_API_KEY` | Tavily 配额耗尽后备用（250次/月） |
 | `SERPER_API_KEY` | 三级 fallback |

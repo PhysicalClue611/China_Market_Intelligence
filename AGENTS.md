@@ -89,11 +89,12 @@ launchd 直接调 `~/MI/.venv/bin/python`，无 Docker，无 LLM 介入。
 
 | 场景 | 模型 |
 |---|---|
-| Prefilter 门控 | `google/gemma-4-31b-it`（OpenRouter，reasoning off，provider Crusoe/Friendli/OpenInference） |
-| 邮件指令解析 / 英文名推断 | `openai/gpt-oss-20b` |
-| 情报抓取 | Tavily `topic=general, days=30` |
+| 情报主合成 | `deepseek-v4-pro` + `reasoning_effort=high`（DeepSeek 直连） |
+| Prefilter 门控 | `google/gemma-4-31b-it`（OpenRouter，reasoning off，provider Crusoe/Friendli/OpenInference，Together ignore，`allow_fallbacks=false`） |
+| 邮件指令解析 / 英文名推断 | `openai/gpt-oss-20b`（OpenRouter） |
+| 情报抓取 | Tavily `topic=general, days=8` → SerpApi → Serper |
 
-OpenRouter provider 白名单：`["Inceptron", "AkashML", "Nebius", "NovitaAI", "Parasail"]`
+OpenRouter 邮件解析仍走 5-provider 池；prefilter 单独锁 Crusoe/Friendli/OpenInference，不要用 Novita（PITFALLS #18）。
 
 ---
 
@@ -138,7 +139,7 @@ Obsidian 输出：`Paperview/Hermes/MI/YYYY-MM-DD-china-companies.md`
 ## 踩过的坑
 
 ### 1. Prefilter 返回空 JSON（pass-through 降级）
-DeepSeek V4 Flash 在 prefilter 阶段偶尔返回空响应（`Expecting value: line 1 column 1`），原因是推理模型在 reasoning 阶段消耗完 token。已有 pass-through 降级逻辑，不影响主流程，但 prefilter 质量丢失。2026-05-04 dry run 中 4/6 家触发，正常。
+DeepSeek V4 Flash 在 prefilter 阶段偶尔返回空响应（`Expecting value: line 1 column 1`），原因是推理模型在 reasoning 阶段消耗完 token。2026-05-04 dry run 中 4/6 家触发。完整记录见 `PITFALLS.md` #1/#28/#29。**2026-09-01 起 prefilter 已不再使用 Flash**（改 OR Gemma 31B IT、reasoning off，见 #31）；pass-through 分支仍在，失败时仍会放行当批文章。
 
 ### 2. load_dotenv 路径层级
 脚本从 `~/.hermes/skills/intel/` 搬至 `~/MI/` 后，`load_dotenv` 的相对路径少一级 `..`。已修复为 `os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")`。
