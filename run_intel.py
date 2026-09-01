@@ -627,6 +627,7 @@ def run_intel(recipients: list[str] | None = None, force: bool = False):
     seen_urls = _load_seen_urls()
     fetch_log = _load_fetch_log()
     sections = []
+    failed_companies: list[str] = []
     total_input = total_output = 0
 
     for company in companies:
@@ -732,6 +733,7 @@ def run_intel(recipients: list[str] | None = None, force: bool = False):
         except IntelConfigError:
             raise  # 部署/配置错误逃到 __main__ 非零退出，不当单公司瞬时故障吞掉（issue #15）
         except Exception:
+            failed_companies.append(zh)
             logger.exception(f"[{zh}] Unexpected error processing company, skipping")
             continue
 
@@ -740,6 +742,16 @@ def run_intel(recipients: list[str] | None = None, force: bool = False):
         _save_fetch_log(fetch_log)
 
     if not sections:
+        if failed_companies:
+            logger.error(
+                "No sections produced; %d/%d companies failed with errors (%s) — "
+                "not sending 'no new intel' success notification",
+                len(failed_companies), len(companies), ", ".join(failed_companies),
+            )
+            raise RuntimeError(
+                "run_intel: all companies failed with errors "
+                f"({', '.join(failed_companies)}) — no sections produced"
+            )
         logger.info("No new intel for any company — sending notification email.")
         sid = send_report(
             subject=f"[Hermes MI] 本周无新情报 {date_str}",
@@ -771,6 +783,10 @@ def run_intel(recipients: list[str] | None = None, force: bool = False):
     output_dir.mkdir(parents=True, exist_ok=True)
     filepath = output_dir / f"{date_str}-china-companies.md"
 
+    failed_note = ""
+    if failed_companies:
+        failed_note = f"\n> [!] 跳过（处理异常）：{'、'.join(failed_companies)}\n"
+
     body = f"""---
 date: {date_str}
 tags: [intelligence, china-companies]
@@ -780,7 +796,7 @@ tags: [intelligence, china-companies]
 
 > 搜索层：Tavily (topic=general, days={SEARCH_DAYS}) + Serper News (CN) | 推理层：{LLM_MODEL_PRO} (synthesis) / {LLM_MODEL_FLASH} (prefilter) via DeepSeek API
 > 生成时间：{datetime.now(SGT).strftime("%Y-%m-%d %H:%M SGT")}{"（force）" if force else ""} | tokens: in={total_input} out={total_output} | ~${cost:.4f}
-
+{failed_note}
 {chr(10).join(sections)}
 
 ---
@@ -790,21 +806,27 @@ tags: [intelligence, china-companies]
     filepath.write_text(body, encoding="utf-8")
     logger.info(f"Intel written → {filepath}")
 
+    report_subject = f"[Hermes MI] 中国企业情报日报 {date_str}"
+    if failed_companies:
+        report_subject += f"（跳过：{'、'.join(failed_companies)}）"
     target_recipients = recipients if recipients is not None else get_recipients()
     sid = send_report(
-        subject=f"[Hermes MI] 中国企业情报日报 {date_str}",
+        subject=report_subject,
         markdown_body=body,
         recipients=target_recipients,
     )
     if sid:
         _save_processed_id(sid)
     logger.info(f"Intel sent → {target_recipients}")
-    _send_telegram_alert(
+    tg_alert = (
         f"[Hermes MI] 情报日报 {date_str}\n"
         f"有新情报：{len(sections)}/{len(companies)} 家企业\n"
         f"tokens: in={total_input} out={total_output} | ~${cost:.4f}\n"
         f"任务ID：{uid}"
     )
+    if failed_companies:
+        tg_alert += f"\n跳过（处理异常）：{'、'.join(failed_companies)}"
+    _send_telegram_alert(tg_alert)
     post_slack_report(body)
 
 
