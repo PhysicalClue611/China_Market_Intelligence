@@ -22,7 +22,7 @@
 
 | 文件 | 用途 | 操作规则 |
 |------|------|---------|
-| `~/MI/PITFALLS.md` | 详细踩坑记录（31 条，报错原文/修复代码/教训），从本文件拆出以控制体积 | 每次修复新故障后追加新条目到文件末尾；排查 bug 前先读 |
+| `~/MI/PITFALLS.md` | 详细踩坑记录（32 条，报错原文/修复代码/教训），从本文件拆出以控制体积 | 每次修复新故障后追加新条目到文件末尾；排查 bug 前先读 |
 | `Hermes/MI/Hermes_MI设计文档.md`（Obsidian） | 系统架构设计文档，面向独立实现者，描述当前状态 | 架构/配置/模型选型变更时同步更新；"更新文档"指令必写 |
 | `Hermes/MI/Hermes_MI开发日志.md`（Obsidian） | 开发决策与踩坑记录，早的在前、晚的在后 | 每次重要变更后 append 到文件末尾；"更新文档"指令必写 |
 
@@ -44,7 +44,8 @@
 ├── pyproject.toml        # 依赖声明（uv 管理）
 ├── uv.lock               # 锁定依赖版本
 ├── .env                  # API keys + HERMES_DATA/OBSIDIAN_PATH
-├── .venv/                # uv sync 生成，Python 3.11
+├── .python-version       # uv 固定 3.14
+├── .venv/                # uv sync 生成，Python 3.14（Homebrew python@3.14）
 ├── *.py                  # 所有脚本在根目录
 └── data/
     ├── credentials.json  # Gmail OAuth client secret（已弃用，保留备查）
@@ -66,7 +67,7 @@
 | `com.hermes.intel` | 周日 08:59 PDT | `~/MI/run_intel.py` | `~/MI/logs/intel.log` | `~/MI/logs/intel-launchd.log` |
 | `com.hermes.emailcheck` | 每 5 分钟 | `~/MI/email_check.py` | `~/MI/logs/emailcheck.log` | `~/MI/logs/emailcheck-launchd.log` |
 | `com.hermes.mi-slack-check` | 每 5 分钟 | `~/MI/slack_check.py` | `~/MI/logs/slack-check.log` | `~/MI/logs/slack-check-launchd.log` |
-| `com.mi.sama-relay` | 每小时 | `~/MI/sama_relay.py` | `~/MI/logs/sama_relay.log` | `~/MI/logs/sama-relay-launchd.log` |
+| `com.mi.sama-relay`（已停用，plist 移至 `~/Library/LaunchAgents/.disabled/`） | 每小时 | `~/MI/sama_relay.py` | `~/MI/logs/sama_relay.log` | `~/MI/logs/sama-relay-launchd.log` |
 
 日志已从 `/tmp` 迁移到项目自身目录 `~/MI/logs/`（2026-07-11，见 issue #1 [Comment] / #2）：`/tmp` 下超过 3 天未访问的文件会被 macOS 每日 `periodic` 清理任务删除，导致周执行任务的日志"看似不存在"、巡检误报。新方案由 `log_utils.py` 的 `setup_logging()` 提供 `TimedRotatingFileHandler`（`backupCount=30`），三个脚本的 `if __name__ == "__main__":` 均已改为调用它；plist 的 `StandardOutPath`/`StandardErrorPath` 只作为 import 期崩溃等无法走 Python logging 的场景的兜底，正常运行不会写入。
 
@@ -199,7 +200,7 @@ Obsidian 输出：`Paperview/Hermes/MI/YYYY-MM-DD-china-companies.md`
 
 ## 踩过的坑
 
-详细踩坑记录（31 条，含具体报错、修复代码、教训）已拆到 **`PITFALLS.md`**（同目录）。排查 bug、判断某类故障是否已知、或改动前想确认"这里以前踩过坑没有"时读取该文件。本文件只保留最近几条的一句话索引，完整上下文一律看 `PITFALLS.md`：
+详细踩坑记录（32 条，含具体报错、修复代码、教训）已拆到 **`PITFALLS.md`**（同目录）。排查 bug、判断某类故障是否已知、或改动前想确认"这里以前踩过坑没有"时读取该文件。本文件只保留最近几条的一句话索引，完整上下文一律看 `PITFALLS.md`：
 
 - #24 无日期转载文章绕过时效过滤 → 一年前旧财报被写成"本周新动态"（已修复，issue #12）
 - #25 OpenRouter `HTTP-Referer` 用裸字符串非 URL → 归属 header 静默失效（已修复 2026-07-13）
@@ -209,6 +210,7 @@ Obsidian 输出：`Paperview/Hermes/MI/YYYY-MM-DD-china-companies.md`
 - #29 徐工年份错位事故：`json.loads` 无法区分"真空"与"格式错误"+ 手写重试补丁在 3 处调用点各自漏了 try/except 保护 → 引入 4 个新 bug，最终收敛为共享 `call_llm_json()` + `response_format=json_object`（已修复 2026-07-19）
 - #30 iCloud scandir EINTR 打断周任务 → 整周报告静默缺失；glob 重试 + 公司循环隔离 + 全家失败 raise（已修复 2026-09-01，issue #15）
 - #31 Flash 做结构化门控未关 thinking → 李宁 2 篇被原样回显成 JSON 数组、整层门控 pass-through；prefilter 换 OR `google/gemma-4-31b-it` + reasoning off（已修复 2026-09-01，issue #17）
+- #32 换 venv 解释器后每个 LaunchAgent 首次启动被 macOS Launch Constraint 杀掉（-9、无日志）；周任务须在下次触发前 `launchctl kickstart` 一次让约束更新（2026-10-07，3.11 → 3.14 升级）
 
 ---
 
