@@ -42,8 +42,8 @@
 | plist | 周期 | 脚本 | 日志（30天滚动） | launchd 兜底 stdout/stderr |
 |---|---|---|---|---|
 | `com.hermes.intel` | 周日 08:59 PDT | `~/MI/run_intel.py` | `~/MI/logs/intel.log` | `~/MI/logs/intel-launchd.log` |
-| `com.hermes.emailcheck` | 每 5 分钟 | `~/MI/email_check.py` | `~/MI/logs/emailcheck.log` | `~/MI/logs/emailcheck-launchd.log` |
-| `com.hermes.mi-slack-check` | 每 5 分钟 | `~/MI/slack_check.py` | `~/MI/logs/slack-check.log` | `~/MI/logs/slack-check-launchd.log` |
+| `com.hermes.emailcheck`（已停用 2026-10-08，plist 移至 `~/Library/LaunchAgents/.disabled/`） | 每 5 分钟 | `~/MI/email_check.py` | `~/MI/logs/emailcheck.log` | `~/MI/logs/emailcheck-launchd.log` |
+| `com.hermes.mi-slack-check`（已停用 2026-10-08，plist 移至 `~/Library/LaunchAgents/.disabled/`） | 每 5 分钟 | `~/MI/slack_check.py` | `~/MI/logs/slack-check.log` | `~/MI/logs/slack-check-launchd.log` |
 
 launchd 直接调 `~/MI/.venv/bin/python`，无 Docker，无 LLM 介入。
 `com.hermes.mempalace-bridge` 常驻运行（port 8765），为脚本提供 MemPalace/Obsidian API。

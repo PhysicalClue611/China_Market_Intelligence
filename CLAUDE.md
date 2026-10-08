@@ -65,8 +65,8 @@
 | plist | 周期 | 脚本 | 日志（Python logging，30天滚动） | launchd 原始 stdout/stderr（异常兜底） |
 |---|---|---|---|---|
 | `com.hermes.intel` | 周日 08:59 PDT | `~/MI/run_intel.py` | `~/MI/logs/intel.log` | `~/MI/logs/intel-launchd.log` |
-| `com.hermes.emailcheck` | 每 5 分钟 | `~/MI/email_check.py` | `~/MI/logs/emailcheck.log` | `~/MI/logs/emailcheck-launchd.log` |
-| `com.hermes.mi-slack-check` | 每 5 分钟 | `~/MI/slack_check.py` | `~/MI/logs/slack-check.log` | `~/MI/logs/slack-check-launchd.log` |
+| `com.hermes.emailcheck`（已停用 2026-10-08，plist 移至 `~/Library/LaunchAgents/.disabled/`） | 每 5 分钟 | `~/MI/email_check.py` | `~/MI/logs/emailcheck.log` | `~/MI/logs/emailcheck-launchd.log` |
+| `com.hermes.mi-slack-check`（已停用 2026-10-08，plist 移至 `~/Library/LaunchAgents/.disabled/`） | 每 5 分钟 | `~/MI/slack_check.py` | `~/MI/logs/slack-check.log` | `~/MI/logs/slack-check-launchd.log` |
 | `com.mi.sama-relay`（已停用，plist 移至 `~/Library/LaunchAgents/.disabled/`） | 每小时 | `~/MI/sama_relay.py` | `~/MI/logs/sama_relay.log` | `~/MI/logs/sama-relay-launchd.log` |
 
 日志已从 `/tmp` 迁移到项目自身目录 `~/MI/logs/`（2026-07-11，见 issue #1 [Comment] / #2）：`/tmp` 下超过 3 天未访问的文件会被 macOS 每日 `periodic` 清理任务删除，导致周执行任务的日志"看似不存在"、巡检误报。新方案由 `log_utils.py` 的 `setup_logging()` 提供 `TimedRotatingFileHandler`（`backupCount=30`），三个脚本的 `if __name__ == "__main__":` 均已改为调用它；plist 的 `StandardOutPath`/`StandardErrorPath` 只作为 import 期崩溃等无法走 Python logging 的场景的兜底，正常运行不会写入。
