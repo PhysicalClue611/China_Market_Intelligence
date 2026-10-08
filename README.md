@@ -39,7 +39,7 @@ Search (Tavily / SerpApi / Serper)
 
 | Requirement | Notes |
 |---|---|
-| Python 3.11+ | Managed via `uv` |
+| Python 3.14 | Pinned in `.python-version`; venv managed via `uv` |
 | [uv](https://github.com/astral-sh/uv) | `pip install uv` or `brew install uv` |
 | macOS (for scheduling) | Scripts run on any platform manually; launchd scheduling is macOS-only |
 | [Obsidian](https://obsidian.md) | Output vault and watchlist configuration |

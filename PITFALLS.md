@@ -176,3 +176,22 @@ issue #5/#6/#7（踩坑 #20-23）修过的两类模式在其余入口原样存�
 **验证**（2026-09-01 真人对照 + 本机探针）：李宁 08-31 两篇（Media OutReach + Perplexity）Gemma 返回对象 `keep[0,1]`、`event_date` 2026-08-20/2026-08-27、Crusoe、`reasoning_tokens=0`、completion 72；Flash 同题 reasoning_tokens=3022。题库 NR-01 锻升重工 GT `{0,3}` 命中。单测覆盖：请求体（model/reasoning/provider/attribution header）、合法 keep 过滤行为、JSON 数组 → pass-through、缺 `OPENROUTER_API_KEY` → `IntelConfigError`、`meta_cb` 收到 provider/usage。
 
 **教训**：结构化门控这类零推理任务，选模型的第一标准是"能否关掉 reasoning 且格式稳定"，不是"同模型族的推理能力强不强"；生产上同一模型在 thinking on 与 off 之间可能输出形状完全不同的东西（对象 vs 数组），且 thinking token 白付全价 output 费用。换模型前先查该模型在目标 provider 上 reasoning off 是否真的生效（用 `usage.completion_tokens_details.reasoning_tokens == 0` 验证），不能只看模型名。
+
+### 32. 换 venv 解释器后 LaunchAgent 首次启动被 macOS Launch Constraint 杀掉（2026-10-07，Python 3.11 → 3.14 升级）
+2026-10-07 把 `~/MI/.venv` 从 uv 管理的 cpython 3.11.15 重建为 Homebrew `python@3.14`（3.14.7）后，plist 一字未改，`com.hermes.emailcheck`（22:59:53 ET）与 `com.hermes.mi-slack-check`（23:02:57 ET）切换后的**第一次**触发都被 SIGKILL：`launchctl list` 显示退出码 `-9`，业务日志与 launchd stdout/stderr 兜底日志都没有任何输出，`~/Library/Logs/DiagnosticReports/` 多出 `python3.14-*.ips`。系统日志（`/usr/bin/log show`；zsh 里裸 `log` 是内建命令，会报 `too many arguments`）原文：
+
+```
+xpcproxy exited due to OS_REASON_CODESIGNING | Launch Constraint Violation, error info: c[5]p[1]m[1]e[0], (Constraint not matched) ...
+Requesting LWCR update on next spawn
+```
+
+**根因**：macOS 对每个 LaunchAgent（按 plist/BTM uuid）记录了一份 launch constraint（LWCR），绑定的是上次实际启动的可执行文件。`.venv/bin/python` 符号链接换了目标后，新二进制与已记录约束不匹配，`xpcproxy` 在 Python 解释器执行前就把进程杀掉，同时请求下一次 spawn 时更新约束。第二次触发即正常（emailcheck 23:04 ET、slack-check 23:08 ET 均 exit 0）。每个 job 恰好丢一次，与解释器版本无关，换回旧 venv（回滚）同样会再触发一次。
+
+**放大点**：5 分钟轮询的 job 丢一次无感；但 `com.hermes.intel` 是周任务，若不处理，下一次周日触发会被杀掉、整周报告缺失，且业务日志为空，巡检看起来像"没跑"（与 #30 同族）。
+
+**处置**：换解释器后、周任务下一次触发前，手动执行一次 `launchctl kickstart gui/502/com.hermes.intel`。按上面两次实测，这一次在 xpcproxy 阶段就被杀，Python 不执行，无副作用（不发信、不调 LLM），同时完成 LWCR 更新。2026-10-07 23:11:15 ET 由用户执行，系统日志确认 `Launch Constraint Violation` + `Requesting LWCR update on next spawn`，`intel.log` 无新增。核实命令：`/usr/bin/log show --start "<本地时间>" --end "<本地时间>" --style compact | grep com.hermes.intel`，`launchctl print gui/502/com.hermes.intel | grep "last exit"`。
+
+**教训**：
+- **改 LaunchAgent 实际执行的二进制（换 venv、换解释器、`brew` 换了 venv `home` 指向的实体）不等于"plist 没改就无影响"**，每个 job 的首次启动会被系统拦一次。切换后要主动核对每个 job 的首次运行，而不是假设下次触发自动生效。
+- kickstart 之前要确认约束确实还没更新（job 自切换以来从未启动过）；否则 kickstart 会完整执行一次真实任务。
+- 失败发生在 Python 之前，Python logging 与 plist 的 stdout/stderr 兜底都不会有痕迹，排查入口是 `launchctl list`/`launchctl print` 的退出码与 `/usr/bin/log show`。

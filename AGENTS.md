@@ -22,7 +22,8 @@
 ├── pyproject.toml        # 依赖声明（uv 管理）
 ├── uv.lock               # 锁定依赖版本
 ├── .env                  # API keys + HERMES_DATA/OBSIDIAN_PATH
-├── .venv/                # uv sync 生成，Python 3.11
+├── .python-version       # uv 固定 3.14
+├── .venv/                # uv sync 生成，Python 3.14（Homebrew python@3.14）
 ├── *.py                  # 所有脚本在根目录
 └── data/
     ├── credentials.json  # Gmail OAuth client secret（重新授权时用）
@@ -38,10 +39,11 @@
 
 ## 调度（宿主机 launchd）
 
-| plist | 周期 | 脚本 | 日志 |
-|---|---|---|---|
-| `com.hermes.intel` | 周日 08:59 PDT | `~/MI/run_intel.py` | `/tmp/hermes_intel.log` |
-| `com.hermes.emailcheck` | 每 5 分钟 | `~/MI/email_check.py` | `/tmp/hermes_emailcheck.log` |
+| plist | 周期 | 脚本 | 日志（30天滚动） | launchd 兜底 stdout/stderr |
+|---|---|---|---|---|
+| `com.hermes.intel` | 周日 08:59 PDT | `~/MI/run_intel.py` | `~/MI/logs/intel.log` | `~/MI/logs/intel-launchd.log` |
+| `com.hermes.emailcheck`（已停用 2026-10-08，plist 移至 `~/Library/LaunchAgents/.disabled/`） | 每 5 分钟 | `~/MI/email_check.py` | `~/MI/logs/emailcheck.log` | `~/MI/logs/emailcheck-launchd.log` |
+| `com.hermes.mi-slack-check`（已停用 2026-10-08，plist 移至 `~/Library/LaunchAgents/.disabled/`） | 每 5 分钟 | `~/MI/slack_check.py` | `~/MI/logs/slack-check.log` | `~/MI/logs/slack-check-launchd.log` |
 
 launchd 直接调 `~/MI/.venv/bin/python`，无 Docker，无 LLM 介入。
 `com.hermes.mempalace-bridge` 常驻运行（port 8765），为脚本提供 MemPalace/Obsidian API。
