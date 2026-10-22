@@ -203,7 +203,7 @@ The same content is delivered as an HTML email and posted to the configured Slac
 
 ## Deploying with Claude Code
 
-This repo ships a `CLAUDE.md` that gives Claude Code deep context about the project architecture, environment variables, known pitfalls, and script interactions. If you have [Claude Code](https://claude.ai/code) installed, you can use it as a deployment co-pilot rather than reading everything manually.
+This repo ships a `CLAUDE.md` that gives Claude Code deep context about the project architecture, environment variables, known pitfalls, and script interactions. The full design document (in Chinese) is at `docs/design.md`, and incident write-ups are in `PITFALLS.md`. If you have [Claude Code](https://claude.ai/code) installed, you can use it as a deployment co-pilot rather than reading everything manually.
 
 **Install Claude Code:**
 
