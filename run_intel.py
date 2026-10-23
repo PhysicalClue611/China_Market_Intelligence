@@ -291,7 +291,7 @@ def run_intel(recipients: list[str] | None = None, force: bool = False, sample: 
                 logger.warning('[%s] LLM synthesis failed after retries, skipping section', zh)
                 logger.info('[%s] FUNNEL %s', zh, json.dumps(funnel, ensure_ascii=False))
                 continue
-            sections.append(f'## {zh}\n\n{text}\n\n---')
+            sections.append(f'## {zh}\n\n{text}')
             logger.info('[%s] FUNNEL %s', zh, json.dumps(funnel, ensure_ascii=False))
             if not force and not sample:
                 ts = datetime.now().timestamp()
@@ -335,6 +335,10 @@ def run_intel(recipients: list[str] | None = None, force: bool = False, sample: 
     failed_note = f"\n> [!] 跳过（处理异常）：{'、'.join(failed_companies)}\n" if failed_companies else ''
     sample_line = ('\n> 样文：新采集与合成流程的试运行，用于展示今后周报的样子，不计入正式周报的去重。' if sample else '')
     screen, synth = RULES['classify'], RULES['synth']
+    # Sections are separated by one rule; load_last_report_section relies on it ending a section.
+    joined = '\n\n---\n\n'.join(sections)
+    footer = get_footer()
+    # Archive (Obsidian): frontmatter, pipeline/cost header and task id for operations.
     body = f'''---
 date: {date_str}
 tags: [intelligence, china-companies]
@@ -345,11 +349,14 @@ tags: [intelligence, china-companies]
 > 采集：东方财富公告 + Google News + Exa | 筛选：{screen['screen_model']} + {screen['review_model']} | 合成：{synth['draft_model']}（{synth['check_model']} 核查）
 > 生成时间：{datetime.now(SGT).strftime('%Y-%m-%d %H:%M SGT')}{'（force）' if force else ''} | 费用 ~${cost:.4f}
 {failed_note}
-{chr(10).join(sections)}
+{joined}
 
 ---
-任务ID：{uid}
-{get_footer()}'''
+任务ID：{uid}{footer}'''
+    # Email/Slack (readers): title, sections and footer only.
+    email_body = f'''# 中国企业情报周报 {date_str}{sample_line}
+{failed_note}
+{joined}{footer}'''
     if not sample:
         output_dir = OBSIDIAN_DIR / 'Hermes' / 'MI'
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -360,7 +367,7 @@ tags: [intelligence, china-companies]
     if failed_companies:
         report_subject += f"（跳过：{'、'.join(failed_companies)}）"
     target_recipients = recipients if recipients is not None else get_recipients()
-    sid = send_report(subject=report_subject, markdown_body=body, recipients=target_recipients)
+    sid = send_report(subject=report_subject, markdown_body=email_body, recipients=target_recipients)
     logger.info('Intel sent → %s', target_recipients)
     if not sample:
         if sid:
@@ -370,7 +377,7 @@ tags: [intelligence, china-companies]
         if failed_companies:
             tg_alert += f"\n跳过（处理异常）：{'、'.join(failed_companies)}"
         _send_telegram_alert(tg_alert)
-        post_slack_report(body)
+        post_slack_report(email_body)
 
 
 if __name__ == '__main__':

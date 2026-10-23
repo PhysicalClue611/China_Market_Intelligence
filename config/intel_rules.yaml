@@ -114,6 +114,9 @@ classify:
 synth:
   draft_model: anthropic/claude-haiku-5.5
   check_model: openai/gpt-6-luna
-  reasoning_effort: high
-  max_tokens: 32000
+  draft_effort: medium     # Haiku draft; reasoning tokens were >80% of output at high
+  check_effort: medium     # Luna fact check
+  revise_effort: low       # sentence-level edits only
+  retry_effort: low        # one retry when the draft hits max_tokens
+  max_tokens: 16000
   last_week_chars: 3000

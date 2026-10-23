@@ -7,6 +7,8 @@ import pytest
 import run_intel as run
 from intel_sources import RULES
 
+REAL_LOAD_LAST_REPORT_SECTION = run.load_last_report_section  # captured before the fixture patches it
+
 
 def article(title='海尔智家工厂投产', **kw):
     return dict(dict(title=title, url='https://example.com/' + title, published=datetime.now(timezone.utc),
@@ -123,15 +125,40 @@ def test_normal_weekly_header_costs_and_delivery(pipeline):
     pipeline['collect_company'].side_effect = collect
     pipeline['classify_two_stage'].side_effect = classify
     pipeline['compose_section'].side_effect = compose
+    pipeline['get_footer'].return_value = '\n\n---\n下次情报推送：X'
     run.run_intel()
     sent = pipeline['send_report'].call_args.kwargs
     assert sent['subject'].startswith('[Hermes MI] 中国企业情报周报 ')
     expected = '> 采集：东方财富公告 + Google News + Exa | 筛选：anthropic/claude-haiku-5.5 + openai/gpt-6-luna | 合成：anthropic/claude-haiku-5.5（openai/gpt-6-luna 核查）'
-    assert expected in sent['markdown_body'] and '费用 ~$0.1100' in sent['markdown_body']
-    assert list((pipeline['tmp'] / 'vault' / 'Hermes' / 'MI').glob('*-china-companies.md'))
+    files = list((pipeline['tmp'] / 'vault' / 'Hermes' / 'MI').glob('*-china-companies.md'))
+    archived = files[0].read_text(encoding='utf-8')
+    assert expected in archived and '费用 ~$0.1100' in archived and '任务ID：' in archived
+    assert archived.startswith('---\ndate: ')
+    email = sent['markdown_body']
+    assert email.startswith('# 中国企业情报周报 ')
+    assert expected not in email and '费用' not in email and '任务ID' not in email and 'tags:' not in email
+    assert '本周总结' in email and '下次情报推送' in email
     for name in ['_save_seen_urls', '_save_fetch_log', '_save_processed_id', '_send_telegram_alert', 'post_slack_report']:
         pipeline[name].assert_called_once()
     assert article()['url'] in pipeline['_save_seen_urls'].call_args.args[0]
+
+
+def test_sections_separated_by_single_rule_and_last_week_parse(pipeline, monkeypatch):
+    pipeline['get_companies_full'].return_value = [{'zh': '海尔集团'}, {'zh': 'TCL'}]
+    pipeline['collect_company'].side_effect = lambda cfg, zh, *a: [article(title=f'{zh}工厂投产')]
+    pipeline['compose_section'].side_effect = lambda zh, *a, **k: f'{zh}的总结'
+    pipeline['get_footer'].return_value = '\n\n---\n下次情报推送：X'
+    run.run_intel()
+    email = pipeline['send_report'].call_args.kwargs['markdown_body']
+    assert '## 海尔集团\n\n海尔集团的总结\n\n---\n\n## TCL\n\nTCL的总结\n\n---\n下次情报推送：X' in email
+    assert '---\n\n---' not in email
+    archived = next((pipeline['tmp'] / 'vault' / 'Hermes' / 'MI').glob('*-china-companies.md')).read_text(encoding='utf-8')
+    assert '---\n\n---' not in archived
+    monkeypatch.setattr(run, 'OBSIDIAN_DIR', pipeline['tmp'] / 'vault')
+    monkeypatch.setattr(run, '_glob_report_files', lambda d: [Mock(stem='2000-01-01-china-companies',
+                                                                   read_text=lambda **k: archived)])
+    assert REAL_LOAD_LAST_REPORT_SECTION('海尔集团') == '海尔集团的总结'
+    assert REAL_LOAD_LAST_REPORT_SECTION('TCL') == 'TCL的总结'
 
 
 def test_company_source_outage_is_skip_not_failure(pipeline, caplog):

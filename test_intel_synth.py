@@ -58,16 +58,17 @@ def test_verbatim_prompts():
     from intel_synth import SYSTEM_PROMPT, CHECK_PROMPT, REVISE_INSTRUCTION, user_prompt
     expected_system = '''你在一家国际咨询公司做大中华区客户经营，每周给合伙人们写一份重点客户动态。读者都是做了二十年战略和IT咨询的老手：他们要的是"这周这家公司出了什么事、谁在拍板、钱从哪来、我们该不该去、什么时候去、去了能不能顺利交付和收到钱"，不需要你教他们咨询行业常识。
 
-观察面要全：战略、组织与人事、经营与运营、供应链与制造、数字化与IT、市场与竞争、财务、治理与合规、海外。不必每一面都写，有料才写。
+观察面要全：战略、组织与人事、经营与运营、供应链与制造、数字化与IT、市场与竞争、财务、治理与合规、海外。但只挑本周最要紧的写，抓大放小。
 
 写法要求：
+- 篇幅：全文不超过500字。只写本周最重要的一到三件事和你的判断，其余一概不写；信息少就两三句话结束。
 - 像资深同事在周一例会上口头汇报后整理成的文字：有判断、有取舍、敢说"这条不重要"或"这条信息不足，先别动"。
 - 先说结论，再给支撑的事实。事实要具体：数字、日期、人名、交易对手、出处（"据财联社""公司公告称"）。
 - 材料标签的用法：【公司公告】是一手信息；【报道·正文】可以引用细节；【仅标题·线索】只能当线索提一句，不得展开成事实或据此推演；来源层级为"门户与自媒体"或"未分级"的内容，引用时要更谨慎；【行业与竞争】用来判断客户所处的环境，和客户本身的事实分开写。
+- 这些标签和来源层级只供你判断把握程度，正文里不要出现标签名或层级名（如"公司公告级""仅标题""未分级""门户来源"），也不要写材料说明、数据口径说明、不能引用清单这类段落。用自然的说法交代出处和把握，例如"公司公告称""据财联社""目前只见到标题，尚未证实"。
 - 咨询角度贯穿全文，而不是最后单列一段套话：机会在哪个部门、哪个具体议题；买方是谁；预算和决策节奏；交付难点；付款和回款风险（国企审批链条、并购整合期预算冻结、业绩承压时砍外部开支等）。没有可行动的机会就直说没有。
 - 不写空泛句子。凡是放在任何一家公司身上都成立的话（"数字化转型是长期趋势""需关注后续进展""窗口期""赋能""抓手""值得注意的是"），删掉。
-- 篇幅跟着信息量走：事情多就写长，事情少就两三句话结束。
-- 版式：可以用三级小标题（###）或粗体小标题，不要用一级、二级标题（# 或 ##），不要用分隔线（---）。可以有少量要点列表，主体是成段的判断。'''
+- 版式：直接从结论写起，不要写标题行、日期行或小标题，不要用分隔线（---）。每件事一段，可以用粗体点出事件名；不要列"仅标题线索""下周看什么"之类的清单。'''
     expected_check = '''你是事实核查员。给你一份原始材料和一份据此写成的客户动态草稿。只核查草稿里关于本期发生了什么的事实性陈述：数字、日期、人名与职务、金额、交易与合作、事件本身。
 只报告三类问题：
 unsupported：草稿当作本期事实写出，但材料里找不到依据。
@@ -77,7 +78,7 @@ contradicted：与材料矛盾，或草稿自己的计算有误。
 只输出 JSON：{"issues":[{"quote":"草稿原句片段","type":"unsupported|title_only_as_fact|contradicted","why":"材料里实际是什么","fix":"改法"}]}。没有问题输出 {"issues":[]}。'''
     assert SYSTEM_PROMPT == expected_system
     assert CHECK_PROMPT == expected_check
-    assert REVISE_INSTRUCTION == '下面的草稿有若干句被事实核查标出问题。只修改这些句子：删掉，或改成"据标题/尚未证实"的说法，或按材料更正。其余文字逐字保留，不新增内容。直接输出修订后的全文，不要任何说明。'
+    assert REVISE_INSTRUCTION == '下面的草稿有若干句被事实核查标出问题。只修改这些句子：删掉，或改成"据标题/尚未证实"的说法，或按材料更正。其余文字逐字保留，不新增内容，修订后全文仍不超过500字。直接输出修订后的全文，不要任何说明。'
     expected = '客户：海尔（Haier）\n\n【本周材料】（过去8天）\n材料\n\n【上周已经汇报过的内容】（不要重复；有新进展才写进展本身）\n（无）\n\n请写本周这家客户的动态。中文。'
     assert user_prompt('海尔', 'Haier', '材料', '', '') == expected
     assert user_prompt('海尔', 'Haier', '材料', '上周', '背景') == expected.replace('（无）', '上周').replace('\n\n请写', '\n\n【个人知识库背景】（仅供背景参考，不是本周事实）\n背景\n\n请写')
@@ -113,14 +114,16 @@ def test_compose_paths_costs_and_requests(check, revision, expected, post_count)
     draft_kw = post.call_args_list[0].kwargs
     assert draft_kw['timeout'] == 400
     assert draft_kw['json_body']['model'] == RULES['synth']['draft_model']
-    assert draft_kw['json_body']['max_tokens'] == 32000
-    assert draft_kw['json_body']['reasoning'] == {'effort': 'high'}
+    assert draft_kw['json_body']['max_tokens'] == RULES['synth']['max_tokens'] == 16000
+    assert draft_kw['json_body']['reasoning'] == {'effort': 'medium'}
     assert draft_kw['json_body']['messages'][0]['content'] == SYSTEM_PROMPT
     checker = check_call.call_args.kwargs['json_body']
     assert checker['model'] == RULES['synth']['check_model'] and checker['max_tokens'] == 12000
+    assert checker['reasoning'] == {'effort': 'medium'}
     assert checker['messages'] == [{'role': 'system', 'content': CHECK_PROMPT},
         {'role': 'user', 'content': '【原始材料】\n材料\n\n【上周已汇报内容】\n上周\n\n【草稿】\n草稿'}]
     if post_count == 2:
+        assert post.call_args.kwargs['json_body']['reasoning'] == {'effort': 'low'}
         revised = post.call_args.kwargs['json_body']['messages'][1]['content']
         assert revised == REVISE_INSTRUCTION + '\n\n【原始材料】\n材料\n\n【草稿】\n草稿\n\n【核查意见】\n' + json.dumps(check['issues'], ensure_ascii=False)
 
@@ -133,9 +136,34 @@ def test_draft_failure(reply):
     check.assert_not_called()
 
 
-def test_heading_cleanup_and_length_warning(caplog):
+def test_heading_cleanup():
     from intel_synth import compose_section
     text = '# 一级\n## 二级\n### 三级\n---\n正文'
     assert compose_section('海尔', '', '材料', '', '', RULES,
-        post=Mock(return_value=llm_response(text, finish='length')), call_json=Mock(return_value={'issues': []})) == '### 一级\n### 二级\n### 三级\n正文'
+        post=Mock(return_value=llm_response(text)), call_json=Mock(return_value={'issues': []})) == '### 一级\n### 二级\n### 三级\n正文'
+
+
+def test_draft_length_retries_once_at_lower_effort(caplog):
+    """Sample 2026-10-23: BYD draft hit max_tokens and a half-written section was emailed."""
+    from intel_synth import compose_section
+    post = Mock(side_effect=[llm_response('半截', finish='length'), llm_response('完整')])
+    assert compose_section('比亚迪', '', '材料', '', '', RULES, post=post,
+                           call_json=Mock(return_value={'issues': []})) == '完整'
+    efforts = [c.kwargs['json_body']['reasoning'] for c in post.call_args_list]
+    assert efforts == [{'effort': 'medium'}, {'effort': 'low'}]
     assert 'length' in caplog.text
+
+
+def test_draft_length_twice_drops_section():
+    from intel_synth import compose_section
+    post = Mock(return_value=llm_response('半截', finish='length'))
+    check = Mock(side_effect=AssertionError('no check for a truncated draft'))
+    assert compose_section('比亚迪', '', '材料', '', '', RULES, post=post, call_json=check) is None
+    assert post.call_count == 2
+
+
+def test_truncated_revision_keeps_draft():
+    from intel_synth import compose_section
+    post = Mock(side_effect=[llm_response('草稿'), llm_response('半截修订', finish='length')])
+    assert compose_section('比亚迪', '', '材料', '', '', RULES, post=post,
+                           call_json=Mock(return_value={'issues': [{'quote': '错'}]})) == '草稿'
