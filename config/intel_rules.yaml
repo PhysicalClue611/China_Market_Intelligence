@@ -1,41 +1,69 @@
 window_days: 8
-gnews:
-  sleep_seconds: 1.1
-  saturation: 90          # base zh query returning >= this many items triggers dimension queries
-  dimensions:
-    战略组织: "(战略 OR 组织架构 OR 改革 OR 任命 OR 总裁 OR 换帅 OR 事业部)"
-    数字化IT: "(数字化 OR 信息化 OR 数智化 OR ERP OR SAP OR 系统上线 OR 大模型 OR 智能制造 OR 工业互联网)"
-    运营供应链: "(工厂 OR 产能 OR 供应链 OR 物流 OR 采购 OR 基地 OR 投产)"
-    治理合规: "(诉讼 OR 处罚 OR 立案 OR 审计 OR 违规 OR 召回)"
-    海外: "(海外 OR 出海 OR 欧洲 OR 东南亚 OR 中东 OR 拉美 OR 关税)"
 exa:
-  num_results: 10
-  max_characters: 3000
+  num_results: 20
+  max_characters: 2000
+  media_domains:
+    - yicai.com
+    - 21jingji.com
+    - eeo.com.cn
+    - jiemian.com
+    - thepaper.cn
+    - stcn.com
+    - cs.com.cn
+    - cnstock.com
+    - nbd.com.cn
+    - cls.cn
+    - bjnews.com.cn
+    - caixin.com
+    - 36kr.com
+    - huxiu.com
+    - tmtpost.com
+    - luxe.co
+    - d1cm.com
+    - hea.cn
+    - gasgoo.com
+    - chinanews.com.cn
+    - xinhuanet.com
+    - people.com.cn
+    - time-weekly.com
+    - lanjinger.com
+    - ce.cn
+    - cnr.cn
+    - iyiou.com
+    - leiphone.com
+    - geekpark.net
+    - ithome.com
+    - infzm.com
+    - chinaventure.com.cn
+    - guancha.cn
   queries:                # {zh} and {en} are substituted; {en} may be empty
-    基础: "{zh} {en} 最新新闻"
-    数字化运营: "{zh} 数字化 智能制造 供应链 IT系统 合作 签约"
-    战略竞争: "{zh} 战略 组织调整 管理层 竞争 海外"
+    综合媒体:
+      template: "{zh} 最新动态"
+      scope: media
+    综合开放:
+      template: "{zh} {en} 本周 新闻"
+      scope: open
+    数字化运营:
+      template: "{zh} 数字化 智能制造 供应链 IT系统 合作 签约"
+      scope: open
+    战略竞争:
+      template: "{zh} 战略 组织调整 管理层 竞争 海外"
+      scope: open
 industries:
   家电:
-    gnews: "(家电 OR 空调 OR 冰箱 OR 洗衣机) (行业 OR 销量 OR 以旧换新 OR 美的 OR 格力 OR 海信)"
     exa: "中国家电行业 竞争 美的 格力 海信 小米 以旧换新 出海"
   显示面板:
-    gnews: "(面板 OR 显示屏) (京东方 OR 价格 OR 产能 OR OLED)"
     exa: "显示面板行业 京东方 OLED LCD 价格 产能"
   光伏:
-    gnews: "(光伏 OR 硅片) (价格 OR 产能 OR 反内卷 OR 隆基)"
     exa: "光伏硅片行业 价格 产能 反内卷"
   运动鞋服:
-    gnews: "(运动鞋服 OR 运动品牌) (特步 OR 361度 OR 耐克 OR 阿迪达斯 OR 流水)"
     exa: "中国运动鞋服行业 耐克 阿迪达斯 特步 361度 竞争 零售"
   工程机械:
-    gnews: "(挖掘机 OR 工程机械) (销量 OR 三一 OR 中联 OR 卡特彼勒 OR 柳工)"
     exa: "工程机械行业 挖掘机 销量 出口 三一 中联 卡特彼勒"
   新能源车:
-    gnews: "(新能源汽车 OR 乘联会) (销量 OR 价格战 OR 吉利 OR 特斯拉 OR 零跑)"
     exa: "中国新能源汽车行业 价格战 出海 吉利 特斯拉 零跑 销量"
 filings:
-  bodies_max: 6
+  bodies_max: 10
   body_chars: 2500
   routine_patterns:
     - 翌日披露报表
@@ -93,18 +121,16 @@ blocked_domains:
   - facaicao.com
   - tfxinteractiva.com
   - reuterd.com
+  - epochtimes.com
+  - ntdtv.com
 source_tiers:             # matched case-insensitively as substring of outlet name or host; first match wins
   主流媒体: [新华, 人民网, 央视, 中新网, chinanews, 财新, 第一财经, yicai, 21世纪, 21jingji, 经济观察, eeo.com.cn, 界面, jiemian, 澎湃, thepaper, 证券时报, stcn, 中国证券报, cs.com.cn, 上海证券报, 每日经济, nbd.com.cn, 财联社, cls.cn, 新京报, Reuters, Bloomberg, Financial Times, ft.com, WSJ, CNBC, SCMP, scmp.com, Nikkei, 信报, hkej]
   行业媒体: [第一工程机械, d1cm, 家电网, hea.cn, 华丽志, luxe.co, 懒熊, 盖世汽车, gasgoo, 汽车之家, 电子工程专辑, eet-china, e-works, CnEVPost, cnevpost, DIGITIMES, 中国商用汽车网, 集邦, trendforce, ofweek, 6300.net, 工程机械]
   门户与自媒体: [新浪, sina, 搜狐, sohu, 网易, 163.com, 腾讯, qq.com, 凤凰, ifeng, 东方财富, eastmoney, 财富号, 雪球, xueqiu, 百家号, 同花顺, 10jqka, 富途, futunn]
 material:
-  filings_max: 6
-  bodies_max: 10
+  filings_max: 10
+  bodies_max: 15
   body_chars: 1800
-  keep_headlines_max: 40
-  mention_headlines_max: 15
-  per_entity_headlines_max: 8
-  industry_headlines_max: 12
   industry_bodies_max: 3
 classify:
   batch_size: 40

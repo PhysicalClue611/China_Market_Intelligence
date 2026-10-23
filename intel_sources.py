@@ -1,14 +1,11 @@
 """Independent, failure-contained news and company-announcement collectors."""
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from email.utils import parsedate_to_datetime
 import logging
 import os
 from pathlib import Path
 import re
-import time
 from urllib.parse import urlsplit
-import xml.etree.ElementTree as ET
 
 import httpx
 import yaml
@@ -76,38 +73,18 @@ def fetch_eastmoney_body(art_code, stats):
         return ''
 
 
-def fetch_gnews(query, lang, stats):
+def fetch_exa(query, since_dt, stats, num, max_chars, dimension, include_domains=None, exclude_domains=None):
     stats.calls += 1
     try:
-        locale = dict(hl='zh-CN', gl='CN', ceid='CN:zh-Hans') if lang == 'zh' else dict(hl='en-US', gl='US', ceid='US:en')
-        response = httpx.get('https://news.google.com/rss/search', params={'q': f'{query} when:7d', **locale},
-                              headers=HEADERS, timeout=25)
-        response.raise_for_status()
-        items = []
-        for row in ET.fromstring(response.text).findall('channel/item'):
-            outlet = row.findtext('source', '')
-            title = row.findtext('title', '')
-            suffix = f' - {outlet}'
-            if outlet and title.endswith(suffix):
-                title = title[:-len(suffix)]
-            pub = row.findtext('pubDate')
-            published = parsedate_to_datetime(pub).astimezone(timezone.utc) if pub else None
-            items.append(_item(title, row.findtext('link', ''), published, outlet, 'headline', '', 'gnews', query_lang=lang))
-        return items, None
-    except Exception as exc:
-        return [], _error(stats, 'gnews', exc)
-    finally:
-        time.sleep(RULES['gnews']['sleep_seconds'])
-
-
-def fetch_exa(query, since_dt, stats, num, max_chars, dimension):
-    stats.calls += 1
-    try:
+        body = {'query': query, 'type': 'auto', 'numResults': num,
+                'startPublishedDate': since_dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z'),
+                'contents': {'text': {'maxCharacters': max_chars}}}
+        if include_domains is not None:
+            body['includeDomains'] = include_domains
+        elif exclude_domains is not None:
+            body['excludeDomains'] = exclude_domains
         response = httpx.post('https://api.exa.ai/search',
-            headers={**HEADERS, 'x-api-key': os.getenv('EXA_API_KEY', '')},
-            json={'query': query, 'type': 'auto', 'category': 'news', 'numResults': num,
-                  'startPublishedDate': since_dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z'),
-                  'contents': {'text': {'maxCharacters': max_chars}}}, timeout=90)
+            headers={**HEADERS, 'x-api-key': os.getenv('EXA_API_KEY', '')}, json=body, timeout=90)
         response.raise_for_status()
         data = response.json()
         stats.exa_cost_usd += (data.get('costDollars') or {}).get('total', 0) or 0
@@ -142,30 +119,22 @@ def collect_company(group_cfg, zh, en, rules, since_dt, stats):
     for entity in group.get('entities', []):
         for code in entity.get('filings', []):
             add(fetch_eastmoney(code, since_dt.date(), stats), entity=entity['name'])
-    alias = group['aliases'][0]
-    count = add(fetch_gnews(alias, 'zh', stats))
-    if group_cfg and count >= rules['gnews']['saturation']:
-        for dimension, expression in rules['gnews']['dimensions'].items():
-            add(fetch_gnews(f'{alias} {expression}', 'zh', stats), dimension=dimension)
-    if en:
-        add(fetch_gnews(en, 'en', stats))
-    for entity in group.get('entities', []):
-        if entity.get('query') in ('zh', 'en'):
-            add(fetch_gnews(entity['aliases'][0], entity['query'], stats), entity=entity['name'])
-    for dimension, template in rules['exa']['queries'].items():
-        if not group_cfg and dimension != '基础':
+    for name, config in rules['exa']['queries'].items():
+        general = name.startswith('综合')
+        if not group_cfg and not general:
             continue
-        query = ' '.join(template.format(zh=zh, en=en).split())
+        query = ' '.join(config['template'].format(zh=zh, en=en).split())
+        domains = ({'include_domains': rules['exa']['media_domains']} if config['scope'] == 'media'
+                   else {'exclude_domains': rules['blocked_domains']})
         add(fetch_exa(query, since_dt, stats, rules['exa']['num_results'], rules['exa']['max_characters'],
-                      None if dimension == '基础' else dimension))
+                      None if general else name, **domains))
     return None if outcomes and all(error is not None for error in outcomes) else items
 
 
 def collect_industry(name, rules, since_dt, stats):
     config = rules['industries'][name]
-    news, _ = fetch_gnews(config['gnews'], 'zh', stats)
-    exa, _ = fetch_exa(config['exa'], since_dt, stats, rules['exa']['num_results'],
-                       rules['exa']['max_characters'], '行业')
-    for item in news + exa:
+    items, _ = fetch_exa(config['exa'], since_dt, stats, rules['exa']['num_results'],
+                         rules['exa']['max_characters'], '行业', exclude_domains=rules['blocked_domains'])
+    for item in items:
         item.update(entity=None, dimension='行业')
-    return news + exa
+    return items

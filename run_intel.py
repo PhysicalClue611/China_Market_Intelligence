@@ -25,6 +25,7 @@ from intel_sources import (ENTITY_MAP, RULES, SourceStats, collect_company,
 from intel_clean import (OR_ATTRIBUTION_HEADERS, clean_company, classify_two_stage,
                          in_window, is_farm, is_low_value, dedupe, published_key)
 from intel_synth import compose_section, build_material
+from log_utils import LOG_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -213,171 +214,177 @@ def _send_telegram_alert(text: str):
 def run_intel(recipients: list[str] | None = None, force: bool = False, sample: bool = False):
     logger.info('Starting intelligence pull (force=%s, sample=%s)...', force, sample)
     _validate_intel_config()
-    date_str = datetime.now().strftime('%Y-%m-%d')
-    uid = f"HRM-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    companies = get_companies_full()
-    if not companies:
-        logger.error('No companies in config, skipping')
-        return
-    seen_urls = _load_seen_urls(persist_prune=not sample)
-    fetch_log = _load_fetch_log()
-    sections, failed_companies = [], []
-    since_dt = datetime.now(timezone.utc) - timedelta(days=RULES['window_days'])
     stats = SourceStats()
     llm_cost = 0.0
-
-    def add_cost(cost):
-        nonlocal llm_cost
-        llm_cost += cost
-
-    industry_results = {}
-    industry_names = dict.fromkeys(name for company in companies
-        for name in ENTITY_MAP.get(company['zh'], {}).get('industries', []))
-    for name in industry_names:
-        try:
-            items = collect_industry(name, RULES, since_dt, stats)
-            items = [row for row in items if in_window(row, since_dt)
-                     and (force or row['url'] not in seen_urls)
-                     and not is_farm(row, RULES) and not is_low_value(row['title'], RULES)]
-            items, _ = dedupe(items)
-            industry_results[name] = classify_two_stage(name, items, RULES, 'industry', cost_cb=add_cost)
-        except Exception:
-            logger.exception('[%s] Industry collection/classification failed; continuing without industry context', name)
-            industry_results[name] = []
-
-    for company in companies:
-        zh, en = company['zh'], company.get('en', '')
-        try:
-            if not force and not sample and fetch_log.get(zh) == date_str:
-                logger.info('[%s] Already fetched today, skipping', zh)
-                continue
-            last_week = load_last_report_section(zh) if not force else ''
-            group_cfg = ENTITY_MAP.get(zh)
-            group = group_cfg or {'aliases': [a for a in (zh, en) if a], 'entities': [], 'industries': []}
-            funnel = {key: 0 for key in ('raw', 'raw_eastmoney', 'raw_gnews', 'raw_exa', 'undated',
-                'window', 'after_window', 'seen', 'after_seen', 'farm', 'after_farm', 'routine', 'after_routine',
-                'low_value', 'after_low_value', 'no_entity', 'after_entity', 'deduped', 'after_dedupe',
-                'classify_keep', 'classify_mention', 'classify_dropped', 'classify_failed',
-                'filings_total', 'filings_bodies', 'material_chars')}
-            items = collect_company(group_cfg, zh, en, RULES, since_dt, stats)
-            if items is None:
-                logger.warning('[%s] all sources failed, will retry next run', zh)
-                logger.info('[%s] FUNNEL %s', zh, json.dumps(funnel, ensure_ascii=False))
-                continue
-            filings, others, clean_funnel = clean_company(items, group, RULES, {} if force else seen_urls, since_dt)
-            funnel.update(clean_funnel)
-            before_classify = len(others)
-            others = classify_two_stage(zh, others, RULES, 'company', cost_cb=add_cost)
-            funnel.update(classify_keep=sum(row['label'] == 'keep' for row in others),
-                          classify_mention=sum(row['label'] == 'mention' for row in others),
-                          classify_dropped=before_classify - len(others),
-                          classify_failed=getattr(others, 'classify_failed', 0))
-            for row in sorted(filings, key=published_key, reverse=True)[:RULES['filings']['bodies_max']]:
-                art_code = row['url'].rsplit('/', 1)[-1].removesuffix('.html')
-                row['body'] = fetch_eastmoney_body(art_code, stats)
-                funnel['filings_bodies'] += bool(row['body'])
-            if not filings and not others:
-                logger.info('[%s] no new intel', zh)
-                logger.info('[%s] FUNNEL %s', zh, json.dumps(funnel, ensure_ascii=False))
-                if not sample:
-                    fetch_log[zh] = date_str
-                continue
-            kb = get_company_context(zh, en)
-            industry_items = [row for name in group.get('industries', []) for row in industry_results.get(name, [])]
-            material = build_material(zh, group, filings, others, industry_items, RULES)
-            funnel['material_chars'] = len(material)
-            text = compose_section(zh, en, material, last_week, kb, RULES, cost_cb=add_cost)
-            if text is None:
-                logger.warning('[%s] LLM synthesis failed after retries, skipping section', zh)
-                logger.info('[%s] FUNNEL %s', zh, json.dumps(funnel, ensure_ascii=False))
-                continue
-            sections.append(f'## {zh}\n\n{text}')
-            logger.info('[%s] FUNNEL %s', zh, json.dumps(funnel, ensure_ascii=False))
-            if not force and not sample:
-                ts = datetime.now().timestamp()
-                for row in filings + others:
-                    seen_urls[row['url']] = {'ts': ts, 'company': zh}
-                fetch_log[zh] = date_str
-        except IntelConfigError:
-            raise
-        except Exception:
-            failed_companies.append(zh)
-            logger.exception('[%s] Unexpected error processing company, skipping', zh)
-            continue
-
-    if not force and not sample:
-        _save_seen_urls(seen_urls)
-        _save_fetch_log(fetch_log)
-    if not sections:
-        if failed_companies:
-            logger.error('No sections produced; %d/%d companies failed with errors (%s) — '
-                         "not sending 'no new intel' success notification",
-                         len(failed_companies), len(companies), ', '.join(failed_companies))
-            raise RuntimeError('run_intel: '
-                f"{len(failed_companies)}/{len(companies)} companies failed "
-                f"with errors ({', '.join(failed_companies)}) — no sections produced, not sending 'no new intel'")
-        if sample:
-            logger.info('Sample: 本周无新情报; sending nothing')
+    try:
+        run_ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+        date_str = datetime.now().strftime('%Y-%m-%d')
+        uid = f'HRM-{run_ts}'
+        companies = get_companies_full()
+        if not companies:
+            logger.error('No companies in config, skipping')
             return
-        logger.info('No new intel for any company — sending notification email.')
-        sid = send_report(subject=f'[Hermes MI] 本周无新情报 {date_str}', markdown_body=(
-            f"# 本周无新情报\n\n所有监控企业（{', '.join(c['zh'] for c in companies)}）"
-            f'均未发现实质新内容，情报已是最新。\n\n任务ID：{uid}\n{get_footer()}'), recipients=get_recipients())
-        if sid:
-            _save_processed_id(sid)
-        _send_telegram_alert(f'[Hermes MI] 本周无新情报 {date_str}\n'
-            f'监控企业：{len(companies)} 家，均无新内容\n任务ID：{uid}')
-        post_slack_report(f'*[Hermes MI] 本周无新情报 {date_str}*\n'
-            f'监控企业 {len(companies)} 家均无新内容。任务ID：{uid}')
-        return
+        seen_urls = _load_seen_urls(persist_prune=not sample)
+        fetch_log = _load_fetch_log()
+        sections, failed_companies = [], []
+        since_dt = datetime.now(timezone.utc) - timedelta(days=RULES['window_days'])
 
-    cost = llm_cost + stats.exa_cost_usd
-    failed_note = f"\n> [!] 跳过（处理异常）：{'、'.join(failed_companies)}\n" if failed_companies else ''
-    sample_line = ('\n> 样文：新采集与合成流程的试运行，用于展示今后周报的样子，不计入正式周报的去重。' if sample else '')
-    screen, synth = RULES['classify'], RULES['synth']
-    # Sections are separated by one rule; load_last_report_section relies on it ending a section.
-    joined = '\n\n---\n\n'.join(sections)
-    footer = get_footer()
-    # Archive (Obsidian): frontmatter, pipeline/cost header and task id for operations.
-    body = f'''---
+        def add_cost(cost):
+            nonlocal llm_cost
+            llm_cost += cost
+
+        industry_results = {}
+        industry_names = dict.fromkeys(name for company in companies
+            for name in ENTITY_MAP.get(company['zh'], {}).get('industries', []))
+        for name in industry_names:
+            try:
+                items = collect_industry(name, RULES, since_dt, stats)
+                items = [row for row in items if in_window(row, since_dt)
+                         and (force or row['url'] not in seen_urls)
+                         and not is_farm(row, RULES) and not is_low_value(row['title'], RULES)]
+                items, _ = dedupe(items)
+                industry_results[name] = classify_two_stage(name, items, RULES, 'industry', cost_cb=add_cost)
+            except Exception:
+                logger.exception('[%s] Industry collection/classification failed; continuing without industry context', name)
+                industry_results[name] = []
+
+        for company in companies:
+            zh, en = company['zh'], company.get('en', '')
+            try:
+                if not force and not sample and fetch_log.get(zh) == date_str:
+                    logger.info('[%s] Already fetched today, skipping', zh)
+                    continue
+                last_week = load_last_report_section(zh) if not force else ''
+                group_cfg = ENTITY_MAP.get(zh)
+                group = group_cfg or {'aliases': [a for a in (zh, en) if a], 'entities': [], 'industries': []}
+                funnel = {key: 0 for key in ('raw', 'raw_eastmoney', 'raw_exa', 'undated',
+                    'window', 'after_window', 'seen', 'after_seen', 'farm', 'after_farm', 'routine', 'after_routine',
+                    'low_value', 'after_low_value', 'no_entity', 'after_entity', 'deduped', 'after_dedupe',
+                    'classify_keep', 'classify_mention', 'classify_dropped', 'classify_failed',
+                    'filings_total', 'filings_bodies', 'material_chars')}
+                items = collect_company(group_cfg, zh, en, RULES, since_dt, stats)
+                if items is None:
+                    logger.warning('[%s] all sources failed, will retry next run', zh)
+                    logger.info('[%s] FUNNEL %s', zh, json.dumps(funnel, ensure_ascii=False))
+                    continue
+                filings, others, clean_funnel = clean_company(items, group, RULES, {} if force else seen_urls, since_dt)
+                funnel.update(clean_funnel)
+                before_classify = len(others)
+                others = classify_two_stage(zh, others, RULES, 'company', cost_cb=add_cost)
+                funnel.update(classify_keep=sum(row['label'] == 'keep' for row in others),
+                              classify_mention=sum(row['label'] == 'mention' for row in others),
+                              classify_dropped=before_classify - len(others),
+                              classify_failed=getattr(others, 'classify_failed', 0))
+                for row in sorted(filings, key=published_key, reverse=True)[:RULES['filings']['bodies_max']]:
+                    art_code = row['url'].rsplit('/', 1)[-1].removesuffix('.html')
+                    row['body'] = fetch_eastmoney_body(art_code, stats)
+                    funnel['filings_bodies'] += bool(row['body'])
+                if not filings and not others:
+                    logger.info('[%s] no new intel', zh)
+                    logger.info('[%s] FUNNEL %s', zh, json.dumps(funnel, ensure_ascii=False))
+                    if not sample:
+                        fetch_log[zh] = date_str
+                    continue
+                kb = get_company_context(zh, en)
+                industry_items = [row for name in group.get('industries', []) for row in industry_results.get(name, [])]
+                material = build_material(zh, group, filings, others, industry_items, RULES)
+                funnel['material_chars'] = len(material)
+                text = compose_section(zh, en, material, last_week, kb, RULES, cost_cb=add_cost,
+                                       audit_path=LOG_DIR / f"audit-{run_ts}-{zh}.md")
+                if text is None:
+                    logger.warning('[%s] LLM synthesis failed after retries, skipping section', zh)
+                    logger.info('[%s] FUNNEL %s', zh, json.dumps(funnel, ensure_ascii=False))
+                    continue
+                sections.append(f'## {zh}\n\n{text}')
+                logger.info('[%s] FUNNEL %s', zh, json.dumps(funnel, ensure_ascii=False))
+                if not force and not sample:
+                    ts = datetime.now().timestamp()
+                    for row in filings + others:
+                        seen_urls[row['url']] = {'ts': ts, 'company': zh}
+                    fetch_log[zh] = date_str
+            except IntelConfigError:
+                raise
+            except Exception:
+                failed_companies.append(zh)
+                logger.exception('[%s] Unexpected error processing company, skipping', zh)
+                continue
+
+        if not force and not sample:
+            _save_seen_urls(seen_urls)
+            _save_fetch_log(fetch_log)
+        if not sections:
+            if failed_companies:
+                logger.error('No sections produced; %d/%d companies failed with errors (%s) — '
+                             "not sending 'no new intel' success notification",
+                             len(failed_companies), len(companies), ', '.join(failed_companies))
+                raise RuntimeError('run_intel: '
+                    f"{len(failed_companies)}/{len(companies)} companies failed "
+                    f"with errors ({', '.join(failed_companies)}) — no sections produced, not sending 'no new intel'")
+            if sample:
+                logger.info('Sample: 本周无新情报; sending nothing')
+                return
+            logger.info('No new intel for any company — sending notification email.')
+            sid = send_report(subject=f'[Hermes MI] 本周无新情报 {date_str}', markdown_body=(
+                f"# 本周无新情报\n\n所有监控企业（{', '.join(c['zh'] for c in companies)}）"
+                f'均未发现实质新内容，情报已是最新。\n\n任务ID：{uid}\n{get_footer()}'), recipients=get_recipients())
+            if sid:
+                _save_processed_id(sid)
+            _send_telegram_alert(f'[Hermes MI] 本周无新情报 {date_str}\n'
+                f'监控企业：{len(companies)} 家，均无新内容\n任务ID：{uid}')
+            post_slack_report(f'*[Hermes MI] 本周无新情报 {date_str}*\n'
+                f'监控企业 {len(companies)} 家均无新内容。任务ID：{uid}')
+            return
+
+        cost = llm_cost + stats.exa_cost_usd
+        failed_note = f"\n> [!] 跳过（处理异常）：{'、'.join(failed_companies)}\n" if failed_companies else ''
+        sample_line = ('\n> 样文：新采集与合成流程的试运行，用于展示今后周报的样子，不计入正式周报的去重。' if sample else '')
+        screen, synth = RULES['classify'], RULES['synth']
+        # Sections are separated by one rule; load_last_report_section relies on it ending a section.
+        joined = '\n\n---\n\n'.join(sections)
+        footer = get_footer()
+        # Archive (Obsidian): frontmatter, pipeline/cost header and task id for operations.
+        body = f'''---
 date: {date_str}
 tags: [intelligence, china-companies]
 ---
 
 # 中国企业情报周报 {date_str}{sample_line}
 
-> 采集：东方财富公告 + Google News + Exa | 筛选：{screen['screen_model']} + {screen['review_model']} | 合成：{synth['draft_model']}（{synth['check_model']} 核查）
+> 采集：东方财富公告 + Exa | 筛选：{screen['screen_model']} + {screen['review_model']} | 合成：{synth['draft_model']}（{synth['check_model']} 核查）
 > 生成时间：{datetime.now(SGT).strftime('%Y-%m-%d %H:%M SGT')}{'（force）' if force else ''} | 费用 ~${cost:.4f}
 {failed_note}
 {joined}
 
 ---
 任务ID：{uid}{footer}'''
-    # Email/Slack (readers): title, sections and footer only.
-    email_body = f'''# 中国企业情报周报 {date_str}{sample_line}
+        # Email/Slack (readers): title, sections and footer only.
+        email_body = f'''# 中国企业情报周报 {date_str}{sample_line}
 {failed_note}
 {joined}{footer}'''
-    if not sample:
-        output_dir = OBSIDIAN_DIR / 'Hermes' / 'MI'
-        output_dir.mkdir(parents=True, exist_ok=True)
-        filepath = output_dir / f'{date_str}-china-companies.md'
-        filepath.write_text(body, encoding='utf-8')
-        logger.info('Intel written → %s', filepath)
-    report_subject = f"{'[Hermes MI][样文]' if sample else '[Hermes MI]'} 中国企业情报周报 {date_str}"
-    if failed_companies:
-        report_subject += f"（跳过：{'、'.join(failed_companies)}）"
-    target_recipients = recipients if recipients is not None else get_recipients()
-    sid = send_report(subject=report_subject, markdown_body=email_body, recipients=target_recipients)
-    logger.info('Intel sent → %s', target_recipients)
-    if not sample:
-        if sid:
-            _save_processed_id(sid)
-        tg_alert = (f'[Hermes MI] 情报周报 {date_str}\n有新情报：{len(sections)}/{len(companies)} 家企业\n'
-                    f'费用 ~${cost:.4f}\n任务ID：{uid}')
+        if not sample:
+            output_dir = OBSIDIAN_DIR / 'Hermes' / 'MI'
+            output_dir.mkdir(parents=True, exist_ok=True)
+            filepath = output_dir / f'{date_str}-china-companies.md'
+            filepath.write_text(body, encoding='utf-8')
+            logger.info('Intel written → %s', filepath)
+        report_subject = f"{'[Hermes MI][样文]' if sample else '[Hermes MI]'} 中国企业情报周报 {date_str}"
         if failed_companies:
-            tg_alert += f"\n跳过（处理异常）：{'、'.join(failed_companies)}"
-        _send_telegram_alert(tg_alert)
-        post_slack_report(email_body)
+            report_subject += f"（跳过：{'、'.join(failed_companies)}）"
+        target_recipients = recipients if recipients is not None else get_recipients()
+        sid = send_report(subject=report_subject, markdown_body=email_body, recipients=target_recipients)
+        logger.info('Intel sent → %s', target_recipients)
+        if not sample:
+            if sid:
+                _save_processed_id(sid)
+            tg_alert = (f'[Hermes MI] 情报周报 {date_str}\n有新情报：{len(sections)}/{len(companies)} 家企业\n'
+                        f'费用 ~${cost:.4f}\n任务ID：{uid}')
+            if failed_companies:
+                tg_alert += f"\n跳过（处理异常）：{'、'.join(failed_companies)}"
+            _send_telegram_alert(tg_alert)
+            post_slack_report(email_body)
+
+    finally:
+        logger.info('COST total=$%.4f openrouter=$%.4f exa=$%.4f', llm_cost + stats.exa_cost_usd, llm_cost, stats.exa_cost_usd)
 
 
 if __name__ == '__main__':

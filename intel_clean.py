@@ -115,7 +115,7 @@ def dedupe(items):
 
 
 def clean_company(items, group, rules, seen_urls, since_dt):
-    funnel = {key: 0 for key in ('raw_eastmoney', 'raw_gnews', 'raw_exa', 'undated', 'window',
+    funnel = {key: 0 for key in ('raw_eastmoney', 'raw_exa', 'undated', 'window',
         'seen', 'farm', 'routine', 'low_value', 'no_entity', 'deduped', 'filings_total')}
     funnel['raw'] = len(items)
     for row in items:

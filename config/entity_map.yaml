@@ -2,7 +2,7 @@
 # relation: core = listed/main entity; subsidiary; brand; affiliate = equity stake, not controlled;
 # related = shareholder-linked, not owned.
 # require_comention: an alias hit on this entity only counts if a group-level alias is also present.
-# query: zh | en | none  — whether this entity gets its own Google News query, and in which language.
+# query: 目前不使用（Google News 已于 2026-10-23 移除），保留是为了以后可能按实体加 Exa 查询。
 # Draft 2026-10-23, pending owner confirmation.
 groups:
   海尔集团:
