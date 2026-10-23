@@ -22,7 +22,7 @@ import errno
 import shutil
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -129,18 +129,17 @@ def test_company_loop_isolates_per_company_error():
     companies = [{"zh": "公司甲"}, {"zh": "公司乙"}]
     fetch_calls = []
 
-    def fake_fetch(company):
-        fetch_calls.append(company)
-        return (None, {})
+    def fake_fetch(group, zh, en, rules, since_dt, stats):
+        fetch_calls.append({"zh": zh})
+        return None
 
     with mock.patch.multiple(
         run_intel,
         _validate_intel_config=mock.DEFAULT,
         get_companies_full=lambda: companies,
-        _load_seen_urls=lambda: {},
+        _load_seen_urls=lambda **kw: {},
         _load_fetch_log=lambda: {},
-        get_articles_by_company=lambda zh: [],
-        fetch_company_raw=fake_fetch,
+        collect_company=fake_fetch,
         load_last_report_section=mock.Mock(side_effect=[RuntimeError("boom"), ""]),
         _save_seen_urls=lambda s: None,
         _save_fetch_log=lambda f: None,
@@ -174,10 +173,9 @@ def test_company_loop_intel_config_error_propagates():
         run_intel,
         _validate_intel_config=mock.DEFAULT,
         get_companies_full=lambda: companies,
-        _load_seen_urls=lambda: {},
+        _load_seen_urls=lambda **kw: {},
         _load_fetch_log=lambda: {},
-        get_articles_by_company=lambda zh: [],
-        fetch_company_raw=lambda c: (None, {}),
+        collect_company=lambda *a, **k: None,
         load_last_report_section=mock.Mock(
             side_effect=run_intel.IntelConfigError("missing config")),
         _save_seen_urls=lambda s: None,
@@ -206,10 +204,9 @@ def test_run_all_companies_error_no_false_success():
         run_intel,
         _validate_intel_config=mock.DEFAULT,
         get_companies_full=lambda: companies,
-        _load_seen_urls=lambda: {},
+        _load_seen_urls=lambda **kw: {},
         _load_fetch_log=lambda: {},
-        get_articles_by_company=lambda zh: [],
-        fetch_company_raw=lambda c: (None, {}),
+        collect_company=lambda *a, **k: None,
         load_last_report_section=mock.Mock(side_effect=RuntimeError("boom")),
         _save_seen_urls=lambda s: None,
         _save_fetch_log=lambda f: None,
@@ -251,10 +248,9 @@ def test_run_no_errors_empty_sections_normal_notification():
         run_intel,
         _validate_intel_config=mock.DEFAULT,
         get_companies_full=lambda: companies,
-        _load_seen_urls=lambda: {},
+        _load_seen_urls=lambda **kw: {},
         _load_fetch_log=lambda: {},
-        get_articles_by_company=lambda zh: [],
-        fetch_company_raw=lambda c: (None, {}),
+        collect_company=lambda *a, **k: None,
         load_last_report_section=lambda zh: "",
         _save_seen_urls=lambda s: None,
         _save_fetch_log=lambda f: None,
@@ -284,25 +280,28 @@ def test_run_partial_failure_sends_report_with_skip_note():
             sent.update(kw)
             return "sid-1"
 
-        def fake_fetch(company):
-            if company["zh"] == "公司乙":
-                return ([{"url": "https://x/1", "title": "t1", "content": "c1",
-                          "published_date": "2026-08-30"}], {})
-            return (None, {})
+        def fake_fetch(group, zh, en, rules, since_dt, stats):
+            if zh == "公司乙":
+                return [{"url": "https://x/1", "title": "公司乙投产", "body": "正文" * 200,
+                         "published": datetime.now(timezone.utc), "kind": "article", "origin": "exa",
+                         "outlet": "Reuters", "entity": None, "dimension": None, "query_lang": None,
+                         "label": "keep"}]
+            return None
 
         with mock.patch.multiple(
             run_intel,
             _validate_intel_config=mock.DEFAULT,
             get_companies_full=lambda: companies,
-            _load_seen_urls=lambda: {},
+            _load_seen_urls=lambda **kw: {},
             _load_fetch_log=lambda: {},
-            get_articles_by_company=lambda zh: [],
-            fetch_company_raw=fake_fetch,
+            collect_company=fake_fetch,
             load_last_report_section=mock.Mock(side_effect=[RuntimeError("boom"), ""]),
-            prefilter_articles=lambda zh, arts, lws: (arts, 100, "ok"),
+            clean_company=lambda items, *a: ([], items, {}),
+            classify_two_stage=lambda subject, items, *a, **kw: items,
+            build_material=lambda *a: "乙的材料",
+            collect_industry=lambda *a: [],
             get_company_context=lambda zh, en: "",
-            synthesize_with_llm=lambda zh, nc, hc, kb, **kw: (
-                "乙的总结", {"prompt_tokens": 10, "completion_tokens": 5}),
+            compose_section=lambda *a, **kw: "乙的总结",
             _save_seen_urls=lambda s: None,
             _save_fetch_log=lambda f: None,
             send_report=fake_send_report,

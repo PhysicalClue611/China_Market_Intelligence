@@ -1,0 +1,83 @@
+# Watchlist company (zh name) -> listed entities, subsidiaries, brands, affiliates (issue #23).
+# relation: core = listed/main entity; subsidiary; brand; affiliate = equity stake, not controlled;
+# related = shareholder-linked, not owned.
+# require_comention: an alias hit on this entity only counts if a group-level alias is also present.
+# query: 目前不使用（Google News 已于 2026-10-23 移除），保留是为了以后可能按实体加 Exa 查询。
+# Draft 2026-10-23, pending owner confirmation.
+groups:
+  海尔集团:
+    en: Haier
+    industries: [家电]
+    aliases: [海尔, 海爾, Haier]
+    exclude: [利勃海尔, 利勃海爾, Liebherr, 苏海尔, 蘇海爾]
+    entities:
+      - {name: 海尔智家, relation: core, filings: ["600690", "06690"], aliases: [海尔智家, Haier Smart Home], query: zh}
+      - {name: 海尔生物, relation: subsidiary, filings: ["688139"], aliases: [海尔生物], query: zh}
+      - {name: 盈康生命, relation: subsidiary, filings: ["300143"], aliases: [盈康生命, 盈康一生], query: zh}
+      - {name: 卡奥斯, relation: subsidiary, aliases: [卡奥斯, COSMOPlat], query: zh}
+      - {name: 日日顺, relation: subsidiary, aliases: [日日顺, 日日順], query: zh}
+      - {name: 海纳云, relation: subsidiary, aliases: [海纳云], query: none}
+      - {name: 卡萨帝, relation: brand, aliases: [卡萨帝, Casarte], query: zh}
+      - {name: GE Appliances, relation: subsidiary, aliases: [GE Appliances], query: en}
+      - {name: Fisher & Paykel, relation: subsidiary, aliases: [Fisher & Paykel], query: none}
+      - {name: Candy, relation: brand, aliases: [Candy Hoover], query: none}
+  TCL:
+    en: TCL
+    industries: [显示面板, 光伏]
+    aliases: [TCL]
+    exclude: []
+    entities:
+      - {name: TCL科技, relation: core, filings: ["000100"], aliases: [TCL科技, TCL Technology], query: zh}
+      - {name: TCL华星, relation: subsidiary, aliases: [TCL华星, 华星光电, CSOT], query: zh}
+      - {name: TCL中环, relation: core, filings: ["002129"], aliases: [TCL中环, TCL Zhonghuan], query: zh}
+      - {name: TCL电子, relation: core, filings: ["01070"], aliases: [TCL电子, TCL Electronics], query: zh}
+      - {name: TCL智家, relation: core, filings: ["002668"], aliases: [TCL智家], query: zh}
+      - {name: TCL实业, relation: subsidiary, aliases: [TCL实业, TCL Industries], query: zh}
+      - {name: 格创东智, relation: subsidiary, aliases: [格创东智], query: none}
+  安踏集团:
+    en: ANTA Sports
+    industries: [运动鞋服]
+    aliases: [安踏, ANTA, Anta]
+    exclude: []
+    entities:
+      - {name: 安踏体育, relation: core, filings: ["02020"], aliases: [安踏体育, ANTA Sports], query: zh}
+      - {name: FILA中国, relation: brand, aliases: [斐乐, FILA中国], query: zh}
+      - {name: 迪桑特, relation: brand, aliases: [迪桑特, DESCENTE], query: zh}
+      - {name: 可隆, relation: brand, aliases: [可隆体育, KOLON SPORT], query: zh}
+      - {name: MAIA ACTIVE, relation: brand, aliases: [MAIA ACTIVE], query: none}
+      - {name: 狼爪, relation: brand, aliases: [狼爪, Jack Wolfskin], query: zh}
+      - {name: 亚玛芬, relation: affiliate, aliases: [亚玛芬, 亞瑪芬, Amer Sports], query: zh}
+      - {name: 彪马, relation: affiliate, aliases: [彪马, PUMA, Puma], query: none, require_comention: true}
+  李宁集团:
+    en: Li Ning
+    industries: [运动鞋服]
+    aliases: [李宁, 李寧, Li Ning, Li-Ning, LI-NING]
+    exclude: []
+    entities:
+      - {name: 李宁, relation: core, filings: ["02331"], aliases: [李宁公司, 李宁有限公司, 中国李宁], query: zh}
+      - {name: 红双喜, relation: subsidiary, aliases: [红双喜, 紅雙喜], query: none, require_comention: true}
+      - {name: 凯胜, relation: brand, aliases: [凯胜, Kason], query: none, require_comention: true}
+      - {name: 非凡领越, relation: related, aliases: [非凡领越], query: none, require_comention: true}
+  徐工集团:
+    en: XCMG
+    industries: [工程机械]
+    aliases: [徐工, XCMG]
+    exclude: []
+    entities:
+      - {name: 徐工机械, relation: core, filings: ["000425"], aliases: [徐工机械, XCMG Machinery], query: zh}
+      - {name: 徐工汽车, relation: subsidiary, aliases: [徐工汽车], query: zh}
+      - {name: 徐工汉云, relation: subsidiary, aliases: [徐工汉云, 汉云工业互联网], query: zh}
+      - {name: 徐工有限, relation: subsidiary, aliases: [徐工有限], query: none}
+  比亚迪:
+    en: BYD
+    industries: [新能源车]
+    aliases: [比亚迪, 比亞迪, BYD]
+    exclude: [Boyd Gaming]
+    entities:
+      - {name: 比亚迪股份, relation: core, filings: ["002594", "01211"], aliases: [比亚迪股份], query: none}
+      - {name: 比亚迪电子, relation: core, filings: ["00285"], aliases: [比亚迪电子, BYD Electronic], query: zh}
+      - {name: 弗迪, relation: subsidiary, aliases: [弗迪电池, 弗迪科技, FinDreams], query: zh}
+      - {name: 腾势, relation: brand, aliases: [腾势, DENZA], query: zh}
+      - {name: 方程豹, relation: brand, aliases: [方程豹], query: zh}
+      - {name: 仰望, relation: brand, aliases: [仰望汽车, 仰望U8, 仰望U9, YANGWANG], query: zh}
+      - {name: 比亚迪半导体, relation: subsidiary, aliases: [比亚迪半导体], query: zh}
