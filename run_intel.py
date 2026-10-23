@@ -11,20 +11,20 @@ import errno
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-import re
 import time
 
 import httpx
 
-from http_utils import post_with_retry, extract_llm_text, call_llm_json
 from email_sender import send_report
 from slack_sender import post_report as post_slack_report
 from config_store import get_companies_full, get_recipients
 from hermes_footer import get_footer
-from article_cache import save_articles, get_articles_by_company
-from dedup_utils import find_cache_duplicate
 from memory_context import get_company_context
-from search_utils import search as search_news, search_cn as search_cn_news
+from intel_sources import (ENTITY_MAP, RULES, SourceStats, collect_company,
+                           collect_industry, fetch_eastmoney_body)
+from intel_clean import (OR_ATTRIBUTION_HEADERS, clean_company, classify_two_stage,
+                         in_window, is_farm, is_low_value, dedupe, published_key)
+from intel_synth import compose_section, build_material
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +36,7 @@ class IntelConfigError(RuntimeError):
 def _validate_intel_config():
     """启动时校验必需环境变量非空，缺失则直接抛出（fail fast），日志只报变量名不报值。"""
     required = {
-        "TAVILY_API_KEY": TAVILY_API_KEY,
-        "DEEPSEEK_API_KEY": DEEPSEEK_API_KEY,
+        "EXA_API_KEY": EXA_API_KEY,
         "OPENROUTER_API_KEY": OPENROUTER_API_KEY,
         "HERMES_DATA": os.getenv("HERMES_DATA", ""),
         "OBSIDIAN_PATH": os.getenv("OBSIDIAN_PATH", ""),
@@ -51,16 +50,8 @@ def _validate_intel_config():
 
 DATA_DIR = Path(os.getenv("HERMES_DATA", "/opt/data"))
 OBSIDIAN_DIR = Path(os.getenv("OBSIDIAN_PATH", "/opt/obsidian"))
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL = "https://api.deepseek.com/chat/completions"
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OR_ATTRIBUTION_HEADERS = {
-    "HTTP-Referer": "https://github.com/PhysicalClue611/China_Market_Intelligence",
-    "X-OpenRouter-Title": "MI",
-}
-JINA_API_KEY = os.getenv("JINA_API_KEY", "")
-JINA_BASE_URL = "https://r.jina.ai"
+EXA_API_KEY = os.getenv("EXA_API_KEY", "")
 
 SEEN_URLS_PATH = DATA_DIR / "seen_urls.json"
 FETCH_LOG_PATH = DATA_DIR / "fetch_log.json"
@@ -69,99 +60,7 @@ SEEN_URL_TTL_DAYS = 90
 EINTR_MAX_ATTEMPTS = 4     # iCloud scandir EINTR retries before degrading (issue #15)
 EINTR_RETRY_SLEEP = 0.1    # seconds between retries
 
-PREFILTER_MODEL = "google/gemma-4-31b-it"   # prefilter gate — OpenRouter, reasoning off (issue #17)
-LLM_MODEL_PRO   = "deepseek-v4-pro"         # final synthesis — DeepSeek direct
-
-# Prefilter provider pool (issue #17): reasoning off must actually be honored.
-# Together leaks reasoning on this model (~67% of calls), so it is excluded.
-# allow_fallbacks=false: if all three preferred hosts are unreachable, fail
-# through to llm_failed_passthrough rather than landing on an untested backend.
-PREFILTER_PROVIDER_CFG = {
-    "order": ["Crusoe", "Friendli", "OpenInference"],
-    "ignore": ["Together"],
-    "allow_fallbacks": False,
-}
-
-SYSTEM_PROMPT = (
-    "你是一名国际顶尖IT咨询公司的合伙人，专注于拓展战略咨询与IT咨询业务，"
-    "包括接触高层领导、发掘咨询机会、引领咨询项目签约及落地，以及后续实施交付和收款工作。"
-    "你的分析始终服务于识别潜在咨询机会、评估客户付费意愿与能力、以及规避商务风险。"
-)
-
 SGT = timezone(timedelta(hours=8))
-CURRENT_YEAR = datetime.now().year
-
-SEARCH_DAYS = 8        # Tavily: index freshness window (days)
-PUB_DATE_MAX_AGE = 9   # drop articles published > N days ago if date parseable
-EVENT_MAX_AGE_DAYS = 30  # drop prefilter-kept articles whose extracted underlying
-                         # event date (not the article's own publish/reprint date)
-                         # is older than this — see issue #12
-JINA_ENRICH_MAX = 5    # max articles to enrich per company (no-date English results)
-JINA_CACHE_CHARS = 4000  # full text stored in article cache
-JINA_LLM_CHARS = 2000    # full text passed to LLM prompt (vs 500 for plain snippets)
-
-
-# ── Date parsing ──────────────────────────────────────────────────────────────
-
-def _parse_pub_date(date_str: str) -> datetime | None:
-    """Parse publication date strings into datetime. Returns None if unparseable.
-
-    Handles:
-    - ISO:            "2026-05-20" / "2026-05-20T00:00:00Z"
-    - Chinese abs:    "2025年3月25日"
-    - Chinese rel:    "3天前" / "2周前" / "1个月前"
-    - English rel:    "3 days ago" / "2 weeks ago" / "1 month ago"
-    """
-    if not date_str:
-        return None
-    s = date_str.strip()
-    now = datetime.now()
-
-    # Chinese relative
-    m = re.match(r'^(\d+)\s*天前$', s)
-    if m:
-        return now - timedelta(days=int(m.group(1)))
-    m = re.match(r'^(\d+)\s*周前$', s)
-    if m:
-        return now - timedelta(weeks=int(m.group(1)))
-    m = re.match(r'^(\d+)\s*个月前$', s)
-    if m:
-        return now - timedelta(days=int(m.group(1)) * 30)
-
-    # Chinese absolute: "2025年3月25日"
-    m = re.match(r'^(\d{4})年(\d{1,2})月(\d{1,2})日', s)
-    if m:
-        try:
-            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-        except ValueError:
-            pass
-
-    # English relative: "3 days ago", "2 weeks ago", "1 month ago"
-    m = re.match(r'^(\d+)\s+day', s, re.I)
-    if m:
-        return now - timedelta(days=int(m.group(1)))
-    m = re.match(r'^(\d+)\s+week', s, re.I)
-    if m:
-        return now - timedelta(weeks=int(m.group(1)))
-    m = re.match(r'^(\d+)\s+month', s, re.I)
-    if m:
-        return now - timedelta(days=int(m.group(1)) * 30)
-
-    # ISO: "2026-05-20" or "2026-05-20T..."
-    try:
-        return datetime.strptime(s[:10], "%Y-%m-%d")
-    except (ValueError, IndexError):
-        pass
-
-    return None
-
-
-# ── Staleness filter ──────────────────────────────────────────────────────────
-
-def _is_stale(title: str) -> bool:
-    """True if title's max 20xx year is 2+ years behind current year (e.g. 2021 annual report)."""
-    years = [int(y) for y in re.findall(r'\b(20\d{2})\b', title)]
-    return bool(years) and max(years) < CURRENT_YEAR - 1
 
 
 # ── Last report section loader ─────────────────────────────────────────────────
@@ -237,21 +136,21 @@ def load_last_report_section(company_zh: str) -> str:
             section_lines.append(line)
 
     section = "\n".join(section_lines).strip()
-    if len(section) > 1200:
-        section = section[:1200] + "\n[...截断]"
+    if len(section) > RULES["synth"]["last_week_chars"]:
+        section = section[:RULES["synth"]["last_week_chars"]] + "\n[...截断]"
     return section
 
 
 # ── Dedup state ───────────────────────────────────────────────────────────────
 
-def _load_seen_urls() -> dict:
+def _load_seen_urls(*, persist_prune: bool = True) -> dict:
     if not SEEN_URLS_PATH.exists():
         return {}
     try:
         data = json.loads(SEEN_URLS_PATH.read_text())
         cutoff = datetime.now().timestamp() - SEEN_URL_TTL_DAYS * 86400
         valid = {url: meta for url, meta in data.items() if meta.get("ts", 0) >= cutoff}
-        if len(valid) != len(data):
+        if persist_prune and len(valid) != len(data):
             SEEN_URLS_PATH.write_text(json.dumps(valid))
         return valid
     except Exception:
@@ -289,344 +188,6 @@ def _save_processed_id(msg_id):
     path.write_text(json.dumps(data))
 
 
-# ── Jina full-text extraction ─────────────────────────────────────────────────
-
-def _jina_extract(url: str) -> str:
-    """Fetch full article text via Jina Reader API. Returns "" on failure (non-fatal).
-
-    Used to enrich English articles that lack published_date (Tavily results),
-    replacing short NLP snippets with actual article content.
-    """
-    if not JINA_API_KEY or not url:
-        return ""
-    try:
-        resp = httpx.get(
-            f"{JINA_BASE_URL}/{url}",
-            headers={
-                "Authorization": f"Bearer {JINA_API_KEY}",
-                "Accept": "application/json",
-                "X-Return-Format": "markdown",
-            },
-            timeout=15,
-            follow_redirects=True,
-        )
-        resp.raise_for_status()
-        content = resp.json().get("data", {}).get("content", "")
-        return content[:JINA_CACHE_CHARS] if content else ""
-    except Exception as e:
-        logger.debug(f"Jina extract failed [{url[:60]}]: {e}")
-        return ""
-
-
-# ── Search + fetch ────────────────────────────────────────────────────────────
-
-def fetch_company_raw(company: dict) -> tuple[list[dict], dict] | tuple[None, dict]:
-    """Bilingual + CN-news parallel search, then relevance/freshness filters.
-
-    Returns (articles_or_None, funnel) where funnel tracks survivor counts at
-    each filter stage for diagnosing why weekly output has been shrinking.
-    """
-    zh = company["zh"]
-    en = company["en"]
-    funnel = {"company": zh}
-
-    # Primary bilingual search (Tavily days=8 → SerpApi → Serper fallback)
-    if en:
-        query = f"{en} {zh} latest news strategy financials"
-    else:
-        query = f"{zh} 最新动态 战略 合作 财报 业绩"
-    try:
-        results = search_news(query, days=SEARCH_DAYS, max_results=8)
-    except Exception as e:
-        logger.warning(f"Search failed [{query}]: {e}")
-        funnel["error"] = "search_failed"
-        return None, funnel
-
-    # Supplemental Chinese news search (Serper News → SerpApi News, non-fatal)
-    cn_query = f"{zh} {en} 最新 新闻 战略 财报" if en else f"{zh} 最新 新闻 战略"
-    cn_results = search_cn_news(cn_query, max_results=6)
-    if cn_results:
-        seen_set = {r["url"] for r in results}
-        added = 0
-        for r in cn_results:
-            if r["url"] and r["url"] not in seen_set:
-                results.append(r)
-                seen_set.add(r["url"])
-                added += 1
-        if added:
-            logger.info(f"[{zh}] CN news supplement: +{added} articles")
-
-    funnel["raw"] = len(results)
-
-    # Method B: published_date filter — drop if parseable date is > PUB_DATE_MAX_AGE days ago
-    cutoff_dt = datetime.now() - timedelta(days=PUB_DATE_MAX_AGE)
-    fresh_by_date = []
-    date_dropped = 0
-    for r in results:
-        pub_dt = _parse_pub_date(r.get("published_date", ""))
-        if pub_dt and pub_dt < cutoff_dt:
-            logger.info(f"[{zh}] Date filter: dropped '{r['title'][:55]}' (pub={r['published_date'][:10]})")
-            date_dropped += 1
-            continue
-        fresh_by_date.append(r)
-    if date_dropped:
-        logger.info(f"[{zh}] Date filter: {len(results)} → {len(fresh_by_date)} ({date_dropped} dropped)")
-    results = fresh_by_date
-    funnel["after_date"] = len(results)
-
-    # Relevance filter: Chinese prefix or English first word must appear
-    zh_kw = zh[:2]
-    en_kw = en.split()[0].lower() if en else ""
-    relevant = [
-        r for r in results
-        if zh_kw in r["title"] or zh_kw in r["content"]
-        or (en_kw and (en_kw in r["title"].lower() or en_kw in r["content"].lower()))
-    ]
-    if len(relevant) < len(results):
-        logger.info(f"[{zh}] Relevance filter: {len(results)} → {len(relevant)} results")
-    funnel["after_relevance"] = len(relevant)
-
-    # Year staleness filter: titles containing only years ≥2 behind current year
-    fresh = [r for r in relevant if not _is_stale(r["title"])]
-    if len(fresh) < len(relevant):
-        stale_titles = [r["title"] for r in relevant if _is_stale(r["title"])]
-        logger.info(f"[{zh}] Staleness filter: removed {len(relevant) - len(fresh)} old docs: {stale_titles}")
-        relevant = fresh
-    funnel["after_staleness"] = len(relevant)
-
-    # Jina enrichment: replace short Tavily snippets with full article text.
-    # Only targets articles without published_date (English Tavily results);
-    # Serper News articles have dates and their snippets already locate the story.
-    if JINA_API_KEY:
-        to_enrich = [r for r in relevant if not r.get("published_date")][:JINA_ENRICH_MAX]
-        if to_enrich:
-            enriched = 0
-            for r in to_enrich:
-                full_text = _jina_extract(r["url"])
-                if full_text and len(full_text) > len(r.get("content", "")):
-                    r["content"] = full_text
-                    r["jina_enriched"] = True
-                    enriched += 1
-            if enriched:
-                logger.info(f"[{zh}] Jina enriched: {enriched}/{len(to_enrich)} articles with full text")
-
-    # Persist to 90-day cache AFTER enrichment so full text is stored
-    if relevant:
-        save_articles(relevant, zh)
-
-    # Truncate for LLM prompt:
-    # - Jina-enriched articles: up to JINA_LLM_CHARS (real content, worth using)
-    # - Plain snippets: 500 chars (same as before)
-    for r in relevant:
-        limit = JINA_LLM_CHARS if r.get("jina_enriched") else 500
-        r["content"] = r["content"][:limit]
-
-    return relevant, funnel
-
-
-# ── Prefilter (OR Gemma, reasoning off) ──────────────────────────────────────
-
-def prefilter_articles(
-    company_zh: str,
-    articles: list[dict],
-    last_report_section: str = "",
-) -> tuple[list[dict], int, str]:
-    """Gemma 31B IT gate (OpenRouter, reasoning disabled): filter low-value
-    articles and cross-week duplicates.
-
-    Also checks against last_report_section to remove articles whose content
-    is already fully covered in the previous week's report.
-
-    Returns (filtered_articles, length_hint, status). length_hint is 0 if all
-    skipped. status is "ok" when the LLM gate actually ran, or
-    "llm_failed_passthrough" when the call/parse failed and all input articles
-    were passed through unfiltered — callers should distinguish the two in the
-    funnel log rather than reading a pass-through as "model kept everything"
-    (issue #10).
-    """
-    if not articles:
-        return [], 0, "ok"
-
-    sgt_now = datetime.now(SGT).strftime("%Y-%m-%d %H:%M SGT")
-    article_list = json.dumps(
-        [{"i": i, "title": a["title"], "summary": a["content"][:300]}
-         for i, a in enumerate(articles)],
-        ensure_ascii=False,
-    )
-
-    last_report_block = ""
-    if last_report_section:
-        last_report_block = (
-            f"\n\n【上周报告内容（参考）】\n"
-            f"以下是上周关于{company_zh}的报告摘要。请将与此高度重叠、无新进展的文章从 keep 列表移除：\n"
-            f"{last_report_section[:800]}"
-        )
-
-    prompt = f"""你是一个情报质量控制器。以下是关于「{company_zh}」的文章列表：
-
-{article_list}
-
-当前时间：{sgt_now}{last_report_block}
-
-请完成以下判断（按优先级）：
-1. 时效性：过滤掉明显超过7天的内容。判断依据：标题/摘要中的明确日期，或文章自带的 published_date 字段。**无日期的文章不得默认保留，必须根据内容本身判断时效性**——若内容仅涉及历史事件、旧财报、旧公告，则视为超期丢弃；仅当内容本身无法判断新旧时才保留。
-2. 相关性：过滤掉与{company_zh}关联度低的文章（仅提及公司名但内容不相关）
-3. 跨周去重：若某篇文章报道的事件与上周报告高度重叠（同一事件无新进展），从 keep 移除
-4. 信息量：若所有剩余文章均为PR稿、无实质内容（无战略变动、财务数据、合作/风险事件），返回 skip=true
-5. 长度建议：根据剩余文章质量和数量，建议报告段字数（200、400或600）
-6. 事件日期抽取：对每篇保留的文章，从标题/摘要中提取其报道的**核心事实性事件日期**（如财报期间、公告发布日、事件实际发生日期），格式 YYYY-MM-DD，无法判断则填 null。**必须区分"文章发布/转载时间"与"事件发生时间"**——例如英文媒体近期转载报道一年前的财报数据，event_date 应填财报对应的实际披露日期，不是转载文章本身的发布日期。
-
-直接输出JSON，禁止任何思考过程文字，禁止markdown代码块：{{"keep": [{{"i": 0, "event_date": "2026-07-09"}}, {{"i": 2, "event_date": null}}], "skip": false, "skip_reason": "", "length_hint": 400}}"""
-
-    def _log_prefilter_meta(data: dict) -> None:
-        # issue #17 acceptance: intel.log must show the OR provider that
-        # served the request and the reasoning_tokens (expected 0 with
-        # reasoning disabled). usage may omit the field on some providers.
-        provider = data.get("provider", "n/a")
-        usage = data.get("usage", {})
-        reasoning_tokens = (
-            usage.get("completion_tokens_details", {}).get("reasoning_tokens", "n/a")
-            if isinstance(usage, dict) and isinstance(usage.get("completion_tokens_details"), dict)
-            else "n/a"
-        )
-        logger.info(
-            f"[{company_zh}] Prefilter LLM: provider={provider}, reasoning_tokens={reasoning_tokens}"
-        )
-
-    result = call_llm_json(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            **OR_ATTRIBUTION_HEADERS,
-        },
-        json_body={
-            "model": PREFILTER_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 4096,
-            "response_format": {"type": "json_object"},
-            "reasoning": {"enabled": False},
-            "provider": PREFILTER_PROVIDER_CFG,
-            "temperature": 0,
-        },
-        timeout=45,
-        logger=logger,
-        label=f"{company_zh} Prefilter",
-        meta_cb=_log_prefilter_meta,
-    )
-    if result is None:
-        return articles, 400, "llm_failed_passthrough"
-
-    try:
-        if result.get("skip"):
-            logger.info(f"[{company_zh}] Prefilter skip: {result.get('skip_reason', '')}")
-            return [], 0, "ok"
-        keep_raw = result.get("keep", [{"i": i, "event_date": None} for i in range(len(articles))])
-        kept = []
-        for entry in keep_raw:
-            if isinstance(entry, dict):
-                idx, event_date = entry.get("i"), entry.get("event_date")
-            else:
-                idx, event_date = entry, None  # tolerate old int-list shape if LLM reverts to it
-            if isinstance(idx, int) and 0 <= idx < len(articles):
-                kept.append((idx, event_date))
-
-        # Deterministic backstop for issue #12: don't trust the LLM's own keep/skip
-        # judgment to have already applied its extracted event_date — enforce it in
-        # code. Articles whose event_date is unparseable/absent are kept unchanged
-        # (matches rule 1's "无法判断则保留").
-        event_cutoff = datetime.now() - timedelta(days=EVENT_MAX_AGE_DAYS)
-        filtered = []
-        event_dropped = 0
-        for idx, event_date in kept:
-            event_dt = _parse_pub_date(event_date) if event_date else None
-            if event_dt and event_dt < event_cutoff:
-                logger.info(f"[{company_zh}] Event-date filter: dropped '{articles[idx]['title'][:55]}' (event={event_date})")
-                event_dropped += 1
-                continue
-            filtered.append(articles[idx])
-        if event_dropped:
-            logger.info(f"[{company_zh}] Event-date filter: {len(kept)} → {len(filtered)} ({event_dropped} dropped, >{EVENT_MAX_AGE_DAYS}d)")
-
-        length_hint = int(result.get("length_hint", 400))
-        logger.info(f"[{company_zh}] Prefilter: {len(articles)} → {len(filtered)} articles, hint={length_hint}w")
-        return filtered, length_hint, "ok"
-    except Exception as e:
-        logger.warning(f"[{company_zh}] Prefilter failed (pass-through): {e}")
-        return articles, 400, "llm_failed_passthrough"
-
-
-# ── LLM synthesis (V4 Pro) ────────────────────────────────────────────────────
-
-def synthesize_with_llm(
-    company: str,
-    new_context: str,
-    historical_context: str = "",
-    kb_context: str = "",
-    last_week_section: str = "",
-    length_hint: int = 400,
-) -> tuple:
-    last_week_block = ""
-    if last_week_section:
-        last_week_block = (
-            f"\n\n【上周报告（{company}）】— 以下内容已报道，本周勿重复，仅在有具体新进展时更新：\n\n"
-            f"{last_week_section}"
-        )
-
-    history_section = ""
-    if historical_context:
-        history_section = f"\n\n【历史留存情报（仅供背景参考）】\n\n{historical_context}"
-
-    kb_section = ""
-    if kb_context:
-        kb_section = f"\n\n【个人知识库上下文（MemPalace / Obsidian / KG）】\n\n{kb_context}"
-
-    prompt = f"""以下是关于 {company} 本周新获取的情报（过去{SEARCH_DAYS}天内）：
-
-{new_context}{last_week_block}{history_section}{kb_section}
-
----
-
-分析立场：国际顶尖IT咨询公司合伙人，目标是识别可行动的咨询机会、评估客户付费意愿与能力、规避商务风险。
-
-**核心规则**：只写相对于上周报告真正新增的内容。已在上周完整报道、本周无进展的事件，完全省略，不要复述。如果本周确实无实质新动态，仅输出一句"本周{company}无实质新动态。"，不补充旧信息，不填充模板。
-
-用中文，书面报告语气，第三人称，禁止列举符号（•、-、*）和数字序号，全篇约{length_hint}字。
-
-按以下逻辑输出，没有内容的节完全省略（包括节标题）：
-
-### 本周新动态
-（仅有真正新增事件时输出）用独立段落表述各项动态：发生了什么 + 为何此时发生的机制判断 + 实质影响是什么。不描述表面现象，要给出因果和结构性分析。
-
-### 财务数据更新
-（仅含本期新出现的具体数字，不重复上周已报告的数据）数据具体，说明同比/环比变化。
-
-### 对IT咨询业务的判断
-（仅在有具体事件驱动时输出，不泛化）必须回答：哪个具体事件触发了哪类IT需求？需求紧迫程度与时间窗口？该公司当前付费意愿和预算能力的变化方向？主要风险？"""
-
-    data, err = post_with_retry(
-        DEEPSEEK_BASE_URL,
-        headers={
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json_body={
-            "model": LLM_MODEL_PRO,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            "max_tokens": 8000,
-            "reasoning_effort": "high",
-        },
-        timeout=300,
-    )
-    if err:
-        return None, {}
-    usage = data.get("usage", {})
-    content = extract_llm_text(data["choices"][0]["message"])
-    return content, usage
-
-
 # ── Telegram alert ───────────────────────────────────────────────────────────
 
 def _send_telegram_alert(text: str):
@@ -649,238 +210,181 @@ def _send_telegram_alert(text: str):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def run_intel(recipients: list[str] | None = None, force: bool = False):
-    logger.info(f"Starting intelligence pull (force={force})...")
-    _validate_intel_config()  # 缺失关键配置直接抛出，不落入下面逻辑被静默吞掉（issue #11）
-
-    date_str = datetime.now().strftime("%Y-%m-%d")
+def run_intel(recipients: list[str] | None = None, force: bool = False, sample: bool = False):
+    logger.info('Starting intelligence pull (force=%s, sample=%s)...', force, sample)
+    _validate_intel_config()
+    date_str = datetime.now().strftime('%Y-%m-%d')
     uid = f"HRM-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     companies = get_companies_full()
     if not companies:
-        logger.error("No companies in config, skipping")
+        logger.error('No companies in config, skipping')
         return
-
-    seen_urls = _load_seen_urls()
+    seen_urls = _load_seen_urls(persist_prune=not sample)
     fetch_log = _load_fetch_log()
-    sections = []
-    failed_companies: list[str] = []
-    total_input = total_output = 0
+    sections, failed_companies = [], []
+    since_dt = datetime.now(timezone.utc) - timedelta(days=RULES['window_days'])
+    stats = SourceStats()
+    llm_cost = 0.0
+
+    def add_cost(cost):
+        nonlocal llm_cost
+        llm_cost += cost
+
+    industry_results = {}
+    industry_names = dict.fromkeys(name for company in companies
+        for name in ENTITY_MAP.get(company['zh'], {}).get('industries', []))
+    for name in industry_names:
+        try:
+            items = collect_industry(name, RULES, since_dt, stats)
+            items = [row for row in items if in_window(row, since_dt)
+                     and (force or row['url'] not in seen_urls)
+                     and not is_farm(row, RULES) and not is_low_value(row['title'], RULES)]
+            items, _ = dedupe(items)
+            industry_results[name] = classify_two_stage(name, items, RULES, 'industry', cost_cb=add_cost)
+        except Exception:
+            logger.exception('[%s] Industry collection/classification failed; continuing without industry context', name)
+            industry_results[name] = []
 
     for company in companies:
-        zh = company["zh"]
-        if not force and fetch_log.get(zh) == date_str:
-            logger.info(f"[{zh}] Already fetched today, skipping")
-            continue
-
+        zh, en = company['zh'], company.get('en', '')
         try:
-            # Load previous week's report section for cross-week dedup
-            last_week_section = load_last_report_section(zh) if not force else ""
-            if last_week_section:
-                logger.info(f"[{zh}] Last report section loaded ({len(last_week_section)} chars)")
-
-            # Snapshot historical cache BEFORE fetch to avoid same-batch mutual L2 drops
-            historical_cache = get_articles_by_company(zh) if not force else []
-            logger.info(f"[{zh}] Fetching news...")
-            raw_results, funnel = fetch_company_raw(company)
-            if raw_results is None:
-                logger.warning(f"[{zh}] Search provider failed, skipping (will retry next run)")
-                logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
+            if not force and not sample and fetch_log.get(zh) == date_str:
+                logger.info('[%s] Already fetched today, skipping', zh)
                 continue
-
-            if not force:
-                new_results = [r for r in raw_results if r["url"] not in seen_urls]
-            else:
-                new_results = raw_results
-            funnel["after_l1"] = len(new_results)
-
-            # L2: title Jaccard similarity — catches same story at a different URL
-            if not force and new_results:
-                l2_kept, l2_skipped = [], 0
-                for r in new_results:
-                    is_dup, score, match = find_cache_duplicate(r["url"], r["title"], historical_cache)
-                    if is_dup:
-                        logger.info(f"[{zh}] L2 dedup: '{r['title'][:55]}' "
-                                    f"(j={score:.2f} ← '{match[:40]}')")
-                        l2_skipped += 1
-                    else:
-                        l2_kept.append(r)
-                if l2_skipped:
-                    logger.info(f"[{zh}] L2 title dedup: {len(new_results)} → {len(l2_kept)} "
-                                f"({l2_skipped} removed)")
-                new_results = l2_kept
-            funnel["after_l2"] = len(new_results)
-
-            if not new_results:
-                logger.info(f"[{zh}] No new URLs after dedup, skipping section")
-                logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
-                fetch_log[zh] = date_str
+            last_week = load_last_report_section(zh) if not force else ''
+            group_cfg = ENTITY_MAP.get(zh)
+            group = group_cfg or {'aliases': [a for a in (zh, en) if a], 'entities': [], 'industries': []}
+            funnel = {key: 0 for key in ('raw', 'raw_eastmoney', 'raw_gnews', 'raw_exa', 'undated',
+                'window', 'after_window', 'seen', 'after_seen', 'farm', 'after_farm', 'routine', 'after_routine',
+                'low_value', 'after_low_value', 'no_entity', 'after_entity', 'deduped', 'after_dedupe',
+                'classify_keep', 'classify_mention', 'classify_dropped', 'classify_failed',
+                'filings_total', 'filings_bodies', 'material_chars')}
+            items = collect_company(group_cfg, zh, en, RULES, since_dt, stats)
+            if items is None:
+                logger.warning('[%s] all sources failed, will retry next run', zh)
+                logger.info('[%s] FUNNEL %s', zh, json.dumps(funnel, ensure_ascii=False))
                 continue
-
-            # Prefilter: Gemma quality + cross-week dedup gate
-            new_results, length_hint, prefilter_status = prefilter_articles(zh, new_results, last_week_section)
-            funnel["after_prefilter"] = len(new_results)
-            funnel["prefilter_status"] = prefilter_status
-            if not new_results:
-                logger.info(f"[{zh}] Prefilter: no actionable intel, skipping section")
-                logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
-                fetch_log[zh] = date_str
+            filings, others, clean_funnel = clean_company(items, group, RULES, {} if force else seen_urls, since_dt)
+            funnel.update(clean_funnel)
+            before_classify = len(others)
+            others = classify_two_stage(zh, others, RULES, 'company', cost_cb=add_cost)
+            funnel.update(classify_keep=sum(row['label'] == 'keep' for row in others),
+                          classify_mention=sum(row['label'] == 'mention' for row in others),
+                          classify_dropped=before_classify - len(others),
+                          classify_failed=getattr(others, 'classify_failed', 0))
+            for row in sorted(filings, key=published_key, reverse=True)[:RULES['filings']['bodies_max']]:
+                art_code = row['url'].rsplit('/', 1)[-1].removesuffix('.html')
+                row['body'] = fetch_eastmoney_body(art_code, stats)
+                funnel['filings_bodies'] += bool(row['body'])
+            if not filings and not others:
+                logger.info('[%s] no new intel', zh)
+                logger.info('[%s] FUNNEL %s', zh, json.dumps(funnel, ensure_ascii=False))
+                if not sample:
+                    fetch_log[zh] = date_str
                 continue
-
-            logger.info(f"[{zh}] {len(new_results)} articles after prefilter, synthesizing with V4 Pro...")
-            new_context = "\n\n---\n\n".join(
-                f"标题：{r['title']}\n内容：{r['content']}\n来源：{r['url']}"
-                for r in new_results
-            )
-            # Historical cache context (background only, not primary source)
-            new_urls = {r["url"] for r in new_results}
-            historical = [a for a in get_articles_by_company(zh) if a["url"] not in new_urls]
-            historical_context = "\n\n---\n\n".join(
-                f"标题：{a['title']}\n内容：{a['content'][:300]}\n来源：{a['url']}"
-                for a in historical[:8]
-            )
-            # Personal knowledge base: MemPalace + Obsidian
-            kb_context = get_company_context(zh, company.get("en", ""))
-            if kb_context:
-                logger.info(f"[{zh}] KB context: {len(kb_context)} chars injected")
-
-            summary, usage = synthesize_with_llm(
-                zh, new_context, historical_context, kb_context,
-                last_week_section=last_week_section,
-                length_hint=length_hint,
-            )
-            if summary is None:
-                logger.warning(f"[{zh}] LLM synthesis failed after retries, skipping section")
-                logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
+            kb = get_company_context(zh, en)
+            industry_items = [row for name in group.get('industries', []) for row in industry_results.get(name, [])]
+            material = build_material(zh, group, filings, others, industry_items, RULES)
+            funnel['material_chars'] = len(material)
+            text = compose_section(zh, en, material, last_week, kb, RULES, cost_cb=add_cost)
+            if text is None:
+                logger.warning('[%s] LLM synthesis failed after retries, skipping section', zh)
+                logger.info('[%s] FUNNEL %s', zh, json.dumps(funnel, ensure_ascii=False))
                 continue
-
-            in_t = usage.get("prompt_tokens", 0)
-            out_t = usage.get("completion_tokens", 0)
-            total_input += in_t
-            total_output += out_t
-            logger.info(f"[{zh}] tokens: in={in_t} out={out_t}")
-            logger.info(f"[{zh}] FUNNEL {json.dumps(funnel, ensure_ascii=False)}")
-            sections.append(f"## {zh}\n\n{summary}\n\n---")
-
-            if not force:
+            sections.append(f'## {zh}\n\n{text}\n\n---')
+            logger.info('[%s] FUNNEL %s', zh, json.dumps(funnel, ensure_ascii=False))
+            if not force and not sample:
                 ts = datetime.now().timestamp()
-                for r in new_results:
-                    seen_urls[r["url"]] = {"ts": ts, "company": zh}
+                for row in filings + others:
+                    seen_urls[row['url']] = {'ts': ts, 'company': zh}
                 fetch_log[zh] = date_str
         except IntelConfigError:
-            raise  # 部署/配置错误逃到 __main__ 非零退出，不当单公司瞬时故障吞掉（issue #15）
+            raise
         except Exception:
             failed_companies.append(zh)
-            logger.exception(f"[{zh}] Unexpected error processing company, skipping")
+            logger.exception('[%s] Unexpected error processing company, skipping', zh)
             continue
 
-    if not force:
+    if not force and not sample:
         _save_seen_urls(seen_urls)
         _save_fetch_log(fetch_log)
-
     if not sections:
         if failed_companies:
-            logger.error(
-                "No sections produced; %d/%d companies failed with errors (%s) — "
-                "not sending 'no new intel' success notification",
-                len(failed_companies), len(companies), ", ".join(failed_companies),
-            )
-            raise RuntimeError(
-                "run_intel: "
+            logger.error('No sections produced; %d/%d companies failed with errors (%s) — '
+                         "not sending 'no new intel' success notification",
+                         len(failed_companies), len(companies), ', '.join(failed_companies))
+            raise RuntimeError('run_intel: '
                 f"{len(failed_companies)}/{len(companies)} companies failed "
-                f"with errors ({', '.join(failed_companies)}) — "
-                "no sections produced, not sending 'no new intel'"
-            )
-        logger.info("No new intel for any company — sending notification email.")
-        sid = send_report(
-            subject=f"[Hermes MI] 本周无新情报 {date_str}",
-            markdown_body=(
-                f"# 本周无新情报\n\n"
-                f"所有监控企业（{', '.join(c['zh'] for c in companies)}）"
-                f"均未发现实质新内容，情报已是最新。\n\n任务ID：{uid}\n{get_footer()}"
-            ),
-            recipients=get_recipients(),
-        )
+                f"with errors ({', '.join(failed_companies)}) — no sections produced, not sending 'no new intel'")
+        if sample:
+            logger.info('Sample: 本周无新情报; sending nothing')
+            return
+        logger.info('No new intel for any company — sending notification email.')
+        sid = send_report(subject=f'[Hermes MI] 本周无新情报 {date_str}', markdown_body=(
+            f"# 本周无新情报\n\n所有监控企业（{', '.join(c['zh'] for c in companies)}）"
+            f'均未发现实质新内容，情报已是最新。\n\n任务ID：{uid}\n{get_footer()}'), recipients=get_recipients())
         if sid:
             _save_processed_id(sid)
-        _send_telegram_alert(
-            f"[Hermes MI] 本周无新情报 {date_str}\n"
-            f"监控企业：{len(companies)} 家，均无新内容\n"
-            f"任务ID：{uid}"
-        )
-        post_slack_report(
-            f"*[Hermes MI] 本周无新情报 {date_str}*\n"
-            f"监控企业 {len(companies)} 家均无新内容。任务ID：{uid}"
-        )
+        _send_telegram_alert(f'[Hermes MI] 本周无新情报 {date_str}\n'
+            f'监控企业：{len(companies)} 家，均无新内容\n任务ID：{uid}')
+        post_slack_report(f'*[Hermes MI] 本周无新情报 {date_str}*\n'
+            f'监控企业 {len(companies)} 家均无新内容。任务ID：{uid}')
         return
 
-    # V4 Pro permanent pricing (promotion made permanent): $0.435/M input, $0.87/M output
-    cost = total_input / 1e6 * 0.435 + total_output / 1e6 * 0.87
-    logger.info(f"Total tokens: in={total_input} out={total_output} | est. cost=${cost:.4f}")
-
-    output_dir = OBSIDIAN_DIR / "Hermes" / "MI"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    filepath = output_dir / f"{date_str}-china-companies.md"
-
-    failed_note = ""
-    if failed_companies:
-        failed_note = f"\n> [!] 跳过（处理异常）：{'、'.join(failed_companies)}\n"
-
-    body = f"""---
+    cost = llm_cost + stats.exa_cost_usd
+    failed_note = f"\n> [!] 跳过（处理异常）：{'、'.join(failed_companies)}\n" if failed_companies else ''
+    sample_line = ('\n> 样文：新采集与合成流程的试运行，用于展示今后周报的样子，不计入正式周报的去重。' if sample else '')
+    screen, synth = RULES['classify'], RULES['synth']
+    body = f'''---
 date: {date_str}
 tags: [intelligence, china-companies]
 ---
 
-# 中国企业情报日报 {date_str}
+# 中国企业情报周报 {date_str}{sample_line}
 
-> 搜索层：Tavily (topic=general, days={SEARCH_DAYS}) + Serper News (CN) | 推理层：{LLM_MODEL_PRO} (synthesis, DeepSeek) / {PREFILTER_MODEL} (prefilter, OpenRouter)
-> 生成时间：{datetime.now(SGT).strftime("%Y-%m-%d %H:%M SGT")}{"（force）" if force else ""} | tokens: in={total_input} out={total_output} | ~${cost:.4f}
+> 采集：东方财富公告 + Google News + Exa | 筛选：{screen['screen_model']} + {screen['review_model']} | 合成：{synth['draft_model']}（{synth['check_model']} 核查）
+> 生成时间：{datetime.now(SGT).strftime('%Y-%m-%d %H:%M SGT')}{'（force）' if force else ''} | 费用 ~${cost:.4f}
 {failed_note}
 {chr(10).join(sections)}
 
 ---
 任务ID：{uid}
-{get_footer()}"""
-
-    filepath.write_text(body, encoding="utf-8")
-    logger.info(f"Intel written → {filepath}")
-
-    report_subject = f"[Hermes MI] 中国企业情报日报 {date_str}"
+{get_footer()}'''
+    if not sample:
+        output_dir = OBSIDIAN_DIR / 'Hermes' / 'MI'
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filepath = output_dir / f'{date_str}-china-companies.md'
+        filepath.write_text(body, encoding='utf-8')
+        logger.info('Intel written → %s', filepath)
+    report_subject = f"{'[Hermes MI][样文]' if sample else '[Hermes MI]'} 中国企业情报周报 {date_str}"
     if failed_companies:
         report_subject += f"（跳过：{'、'.join(failed_companies)}）"
     target_recipients = recipients if recipients is not None else get_recipients()
-    sid = send_report(
-        subject=report_subject,
-        markdown_body=body,
-        recipients=target_recipients,
-    )
-    if sid:
-        _save_processed_id(sid)
-    logger.info(f"Intel sent → {target_recipients}")
-    tg_alert = (
-        f"[Hermes MI] 情报日报 {date_str}\n"
-        f"有新情报：{len(sections)}/{len(companies)} 家企业\n"
-        f"tokens: in={total_input} out={total_output} | ~${cost:.4f}\n"
-        f"任务ID：{uid}"
-    )
-    if failed_companies:
-        tg_alert += f"\n跳过（处理异常）：{'、'.join(failed_companies)}"
-    _send_telegram_alert(tg_alert)
-    post_slack_report(body)
+    sid = send_report(subject=report_subject, markdown_body=body, recipients=target_recipients)
+    logger.info('Intel sent → %s', target_recipients)
+    if not sample:
+        if sid:
+            _save_processed_id(sid)
+        tg_alert = (f'[Hermes MI] 情报周报 {date_str}\n有新情报：{len(sections)}/{len(companies)} 家企业\n'
+                    f'费用 ~${cost:.4f}\n任务ID：{uid}')
+        if failed_companies:
+            tg_alert += f"\n跳过（处理异常）：{'、'.join(failed_companies)}"
+        _send_telegram_alert(tg_alert)
+        post_slack_report(body)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--force", action="store_true",
-                        help="Bypass dedup and per-day rate limit; does not update seen_urls")
-    parser.add_argument("--recipients", default=None,
-                        help="Override recipient list (comma-separated emails)")
+    parser.add_argument('--force', action='store_true', help='Bypass dedup and per-day rate limit; does not update seen_urls')
+    parser.add_argument('--sample', action='store_true', help='Email a sample without publishing or saving dedup state')
+    parser.add_argument('--recipients', default=None, help='Override recipient list (comma-separated emails)')
     args = parser.parse_args()
     from log_utils import setup_logging
-    setup_logging("intel")
-    override = [r.strip() for r in args.recipients.split(",")] if args.recipients else None
+    setup_logging('intel')
+    override = [r.strip() for r in args.recipients.split(',')] if args.recipients else None
     try:
-        run_intel(force=args.force, recipients=override)
+        run_intel(force=args.force, recipients=override, sample=args.sample)
     except Exception:
-        logger.exception("run_intel crashed")
+        logger.exception('run_intel crashed')
         raise
