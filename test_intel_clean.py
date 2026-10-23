@@ -11,7 +11,7 @@ SINCE = datetime(2026, 10, 15, 12, tzinfo=timezone.utc)
 
 def item(title='海尔投产', **kwargs):
     return dict(dict(title=title, url='https://example.com/' + title, published=date(2026, 10, 20),
-                     outlet='Reuters', kind='headline', body='', origin='gnews', dimension=None,
+                     outlet='Reuters', kind='headline', body='', origin='exa', dimension=None,
                      entity=None, query_lang='zh'), **kwargs)
 
 
@@ -76,7 +76,7 @@ def test_clean_stage_counts():
     assert {r['entity'] for r in others} == {'海尔智家', None}
     for key in ['undated', 'seen', 'farm', 'routine', 'low_value', 'no_entity', 'deduped']:
         assert funnel[key] == 1, (key, funnel)
-    assert funnel['raw'] == 11 and funnel['raw_eastmoney'] == 2 and funnel['raw_exa'] == 1
+    assert funnel['raw'] == 11 and funnel['raw_eastmoney'] == 2 and funnel['raw_exa'] == 9
     assert funnel['after_window'] == 9 and funnel['after_seen'] == 8 and funnel['after_farm'] == 7
     assert funnel['filings_total'] == 2 and funnel['after_dedupe'] == 3
 

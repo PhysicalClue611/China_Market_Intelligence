@@ -129,7 +129,7 @@ def test_normal_weekly_header_costs_and_delivery(pipeline):
     run.run_intel()
     sent = pipeline['send_report'].call_args.kwargs
     assert sent['subject'].startswith('[Hermes MI] 中国企业情报周报 ')
-    expected = '> 采集：东方财富公告 + Google News + Exa | 筛选：anthropic/claude-haiku-5.5 + openai/gpt-6-luna | 合成：anthropic/claude-haiku-5.5（openai/gpt-6-luna 核查）'
+    expected = '> 采集：东方财富公告 + Exa | 筛选：anthropic/claude-haiku-5.5 + openai/gpt-6-luna | 合成：anthropic/claude-haiku-5.5（openai/gpt-6-luna 核查）'
     files = list((pipeline['tmp'] / 'vault' / 'Hermes' / 'MI').glob('*-china-companies.md'))
     archived = files[0].read_text(encoding='utf-8')
     assert expected in archived and '费用 ~$0.1100' in archived and '任务ID：' in archived
@@ -191,7 +191,11 @@ def test_industry_cleaned_and_shared_with_material(pipeline, monkeypatch):
     assert [i['title'] for i in build.call_args.args[4]] == ['行业竞品新厂']
 
 
-def test_filing_body_limit_order_and_funnel(pipeline, caplog):
+def test_filing_body_limit_order_and_funnel(pipeline, caplog, monkeypatch):
+    from copy import deepcopy
+    rules = deepcopy(RULES)
+    rules['filings']['bodies_max'] = 6
+    monkeypatch.setattr(run, 'RULES', rules)
     caplog.set_level('INFO')
     rows = [article(f'公告第{i}项独特内容', kind='filing', origin='eastmoney',
                     url=f'https://data.eastmoney.com/notices/detail/600690/AN{i}.html',
@@ -232,3 +236,46 @@ def test_last_week_limit_3000_preserves_loader_behavior(monkeypatch):
     monkeypatch.setattr(run, '_glob_report_files', Mock(return_value=[report]))
     text = run.load_last_report_section('海尔集团')
     assert text == '甲' * 3000 + '\n[...截断]'
+
+
+@pytest.mark.parametrize('mode', ['normal', 'sample', 'empty', 'exception', 'no_companies'])
+def test_cost_log_every_exit(pipeline, caplog, mode):
+    import re
+    caplog.set_level('INFO')
+    def collect(*args):
+        args[-1].exa_cost_usd += .04
+        return [] if mode == 'empty' else [article()]
+    def compose(*args, **kw):
+        kw['cost_cb'](.03)
+        if mode == 'exception':
+            raise run.IntelConfigError('interrupted after paid work')
+        return '本周总结'
+    pipeline['collect_company'].side_effect = collect
+    pipeline['compose_section'].side_effect = compose
+    if mode == 'no_companies':
+        pipeline['get_companies_full'].return_value = []
+    if mode == 'exception':
+        with pytest.raises(run.IntelConfigError):
+            run.run_intel()
+    else:
+        run.run_intel(sample=mode == 'sample')
+    logs = [r.message for r in caplog.records if r.message.startswith('COST total=$')]
+    assert len(logs) == 1
+    total, llm, exa = map(float, re.fullmatch(r'COST total=\$(\d+\.\d{4}) openrouter=\$(\d+\.\d{4}) exa=\$(\d+\.\d{4})', logs[0]).groups())
+    assert total == pytest.approx(llm + exa)
+    assert exa == (0 if mode == 'no_companies' else .04)
+    assert llm == (0 if mode in ('empty', 'no_companies') else .03)
+
+
+def test_audit_paths_share_run_timestamp(pipeline, monkeypatch):
+    import re
+    log_dir = pipeline['tmp'] / 'logs'
+    monkeypatch.setattr(run, 'LOG_DIR', log_dir, raising=False)
+    pipeline['get_companies_full'].return_value = [{'zh': '海尔集团'}, {'zh': 'TCL'}]
+    pipeline['collect_company'].side_effect = lambda cfg, zh, *a: [article(zh + '投产')]
+    run.run_intel(sample=True)
+    paths = [c.kwargs['audit_path'] for c in pipeline['compose_section'].call_args_list]
+    assert len(paths) == 2 and all(p.parent == log_dir for p in paths)
+    stamps = [re.fullmatch(r'audit-(\d{8}-\d{6})-' + zh + r'\.md', p.name).group(1)
+              for p, zh in zip(paths, ['海尔集团', 'TCL'])]
+    assert stamps[0] == stamps[1]
