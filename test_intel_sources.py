@@ -159,3 +159,25 @@ def test_notice_disclaimer_position_after_whitespace_collapse(monkeypatch):
     monkeypatch.setattr(s.httpx, 'get', Mock(return_value=response(
         {'data': {'notice_content': '香港' + ' ' * 500 + '承擔任何責任。\n有效正文'}})))
     assert s.fetch_eastmoney_body('AN1', s.SourceStats()) == '有效正文'
+
+
+def test_fallback_company_never_runs_dimension_queries(monkeypatch):
+    """Review F2: a company absent from entity_map gets zh + en Google News only, even when saturated."""
+    import intel_sources as s
+    news = Mock(return_value=([{'title': '新闻'} for _ in range(120)], None))
+    monkeypatch.setattr(s, 'fetch_gnews', news)
+    monkeypatch.setattr(s, 'fetch_exa', Mock(return_value=([], None)))
+    s.collect_company(None, '陌生公司', 'Unknown', s.RULES, SINCE, s.SourceStats())
+    assert [c.args[:2] for c in news.call_args_list] == [('陌生公司', 'zh'), ('Unknown', 'en')]
+
+
+def test_exa_null_cost_keeps_results(monkeypatch):
+    """Review F3: costDollars present but null must not discard the query's results."""
+    import intel_sources as s
+    monkeypatch.setattr(s.httpx, 'post', Mock(return_value=response({'costDollars': None, 'results': [
+        {'title': '保留', 'url': 'https://example.com/1', 'publishedDate': '2026-10-16T00:00:00.000Z', 'text': '字' * 300},
+    ]})))
+    stats = s.SourceStats()
+    items, err = s.fetch_exa('查询', SINCE, stats, 10, 3000, None)
+    assert err is None and [i['title'] for i in items] == ['保留']
+    assert stats.exa_cost_usd == 0 and stats.errors == 0

@@ -110,7 +110,7 @@ def fetch_exa(query, since_dt, stats, num, max_chars, dimension):
                   'contents': {'text': {'maxCharacters': max_chars}}}, timeout=90)
         response.raise_for_status()
         data = response.json()
-        stats.exa_cost_usd += data.get('costDollars', {}).get('total', 0) or 0
+        stats.exa_cost_usd += (data.get('costDollars') or {}).get('total', 0) or 0
         items = []
         for row in data.get('results', []):
             value = row.get('publishedDate')
@@ -144,7 +144,7 @@ def collect_company(group_cfg, zh, en, rules, since_dt, stats):
             add(fetch_eastmoney(code, since_dt.date(), stats), entity=entity['name'])
     alias = group['aliases'][0]
     count = add(fetch_gnews(alias, 'zh', stats))
-    if count >= rules['gnews']['saturation']:
+    if group_cfg and count >= rules['gnews']['saturation']:
         for dimension, expression in rules['gnews']['dimensions'].items():
             add(fetch_gnews(f'{alias} {expression}', 'zh', stats), dimension=dimension)
     if en:
