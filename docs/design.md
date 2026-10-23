@@ -28,30 +28,27 @@
          |
     run_intel.py
          |
-   search_utils.search() ──────────────────────► Tavily (days=8) / SerpApi / Serper  [主搜索]
-   search_utils.search_cn() ───────────────────► Serper News / SerpApi News (CN)      [中文补充]
+   intel_sources.collect_company() ───────────► 东方财富公告（列表 + 正文） + Exa（4 次/家）
+   intel_sources.collect_industry() ──────────► Exa（1 次/行业）
          |
-   fetch_company_raw() ─────────────────────────► date filter (pub >9d) + relevance + staleness
+   intel_clean.clean_company() ───────────────► 时间窗 / seen_urls / 农场与屏蔽域名 / 例行公告 / 低价值 / 集团别名归属 / 标题聚类去重
          |
-   article_cache.py + dedup_utils.py ─────────► article_cache.json / seen_urls.json (L1+L2)
+   intel_clean.classify_two_stage() ──────────► OpenRouter Haiku 5.5 初筛 + GPT-6 Luna 复核，取严
          |
-   load_last_report_section() ─────────────────► Obsidian 上周报告（跨周去重素材）
+   load_last_report_section() + memory_context.py ─► 上周本节 + MemPalace/Obsidian 背景
          |
-   prefilter_articles() ──────────────────────► OpenRouter Gemma 31B IT, reasoning off (质量+时效+跨周去重)
-         |
-   memory_context.py ──────────────────────────► Bridge :8765 → MemPalace + Obsidian
-         |
-   synthesize_with_llm() ──────────────────────► DeepSeek V4 Pro + reasoning_effort=high
+   intel_synth.build_material() ──────────────► 只收公告与正文报道
+   intel_synth.compose_section() ─────────────► Haiku 起草 → Luna 事实核查 → Haiku 修订；留档 logs/audit-*.md
          |
    ┌─────────────────────────────────────────────────────────┐
    │  Obsidian vault / Hermes/MI/YYYY-MM-DD-china-companies  │
    └─────────────────────────────────────────────────────────┘
          |
    email_sender.py ────────────────────────────► Resend API → 收件人
-         |
    _send_telegram_alert() ─────────────────────► Telegram Bot API
-         |
    slack_sender.post_report() ─────────────────► Slack API → SLACK_MI_CHANNEL
+         |
+   intel.log：每家一行 FUNNEL，每次运行一行 COST
 
 [ launchd 每 5 分钟（已停用 2026-10-08，可手动运行） ]
          |
@@ -65,7 +62,7 @@
          |
    _execute_command()
     ├── config_store.py（增减公司/收件人）
-    ├── _followup_three_stage()（分析提问）─────► OpenRouter gpt-oss-20b + DeepSeek V4 Pro 直连
+    ├── _followup_three_stage()（分析提问）─────► OpenRouter gpt-oss-20b + search_utils + DeepSeek V4 Pro 直连
     └── run_intel()（立即生成）─────────────────► 同上情报主循环
          |
    email_sender.py ────────────────────────────► Resend API → 发件人
@@ -75,25 +72,32 @@
 
 ## 数据流：情报主循环（run_intel.py）
 
-1. **配置加载**：从 `watchlist.md`（优先）或 `intel_config.yaml`（fallback）读取公司列表和收件人
-2. **频率控制**：`fetch_log.json` 记录每公司每日抓取状态，`--force` 绕过
-3. **跨周上下文加载**：`load_last_report_section()` 从 Obsidian 最近历史报告提取该公司节，供 prefilter 和 synthesis 注入。iCloud vault 的 `glob` 遇 `InterruptedError`/`EINTR` 短重试，耗尽返回 `""`（本家不做跨周去重注入），不打死整轮。公司循环隔离瞬时 OS 错误；全家失败且无 sections 则非零退出，不发「无新情报」（issue #15，PITFALLS #30）
-4. **主搜索**：Tavily（days=8）→ SerpApi → Serper fallback，全失败抛 `RuntimeError`，主循环 skip（不写 fetch_log）
-5. **中文补充搜索**：`search_cn()` 调 Serper News → SerpApi News，失败返回 `[]`（非致命），按 URL 去重后 merge
-6. **发布日期过滤（方案 B）**：解析 `published_date`（ISO / 中文绝对 / 中文相对 / 英文相对），> 9 天丢弃；无法解析 pass-through
-7. **相关性过滤**：中文名前两字或英文名第一词命中即保留
-8. **年份过滤（方案 A 补充）**：标题中 max year < current_year - 1 则丢弃（旧年报）
-9. **Jina 全文提取**：对无 `published_date` 的文章（英文 Tavily 结果）调 `r.jina.ai` 取全文，替换短 snippet；有 `published_date` 的 Serper News 文章不处理（已知时效）。失败静默回退，上限 `JINA_ENRICH_MAX=5` 条/公司
-10. **文章入缓存**：`article_cache.json`（90天TTL，flat dict `{url: meta}`），全文存储，在 Jina 丰富后、LLM 截断前写入
-11. **L1 URL 去重**：`seen_urls.json`（90天TTL），已见 URL 跳过
-12. **L2 标题去重**：Jaccard 相似度 ≥ 0.45 视为重复（年份 20xx 保留，其余数字过滤），比对对象为历史缓存快照
-13. **Prefilter（L2.5）**：OpenRouter `google/gemma-4-31b-it`，`reasoning.enabled=false`，`max_tokens=4096`，`response_format=json_object`，`temperature=0`；provider `order=[Crusoe, Friendli, OpenInference]`，`ignore=[Together]`，`allow_fallbacks=false`。合并执行：时效性（含无日期文章主动判断）/ 相关性 / 跨周去重（注入上周报告节）/ 信息量门控；输出 length_hint（200/400/600）。返回值含显式 `status`（`ok`/`llm_failed_passthrough`），写入 FUNNEL 日志的 `prefilter_status`，区分“LLM 调用/解析失败被迫放行”与“模型真的判断全部保留”（2026-07-15，issue #10）。调用/解析统一走 `http_utils.call_llm_json()`（可选 `meta_cb` 把 OR provider 与 `reasoning_tokens` 写进 intel.log，形如 `[李宁] Prefilter LLM: provider=Crusoe, reasoning_tokens=0`，字段缺失记 `n/a`，回调异常只记 warning；2026-09-01，issue #17）。headers 带 `OR_ATTRIBUTION_HEADERS`。报告 footer 推理层写作「{LLM_MODEL_PRO} (synthesis, DeepSeek) / {PREFILTER_MODEL} (prefilter, OpenRouter)」
-14. **知识库注入**：`memory_context.py` 调 bridge 拉 MemPalace 语义搜索 + Obsidian 全文搜索上下文
-15. **LLM 合成**：DeepSeek V4 Pro，`reasoning_effort=high`，`max_tokens=8000`；prompt 注入上周报告节，要求只写新增内容，无新动态输出一句话后停止
-16. **Obsidian 写入**：`{OBSIDIAN_PATH}/Hermes/MI/YYYY-MM-DD-china-companies.md`
-17. **邮件发送**：Resend API，from=`MI@physicalclue.us`
-18. **Telegram 通知**：有情报发摘要，无情报也发通知
-19. **Slack 投递**：`slack_sender.post_report()` 发到 `SLACK_MI_CHANNEL`（mrkdwn，超长自动分块串 thread）
+规则与阈值集中在 `config/intel_rules.yaml`，集团主体映射在 `config/entity_map.yaml`（两份都由 `intel_sources` 在 import 时读入）。
+
+1. **配置校验**：`_validate_intel_config()` 要求 `EXA_API_KEY`、`OPENROUTER_API_KEY`、`HERMES_DATA`、`OBSIDIAN_PATH` 非空，缺失抛 `IntelConfigError`，非零退出
+2. **配置加载**：从 `watchlist.md`（优先）或 `intel_config.yaml`（fallback）读取公司列表和收件人
+3. **频率控制**：`fetch_log.json` 记录每公司每日抓取状态，`--force`/`--sample` 绕过
+4. **行业上下文**：按各公司 `entity_map` 的 `industries` 去重后，每个行业查 1 次 Exa，经窗口/seen/农场/低价值/聚类去重后用行业版标签做两段式分类，只留 keep
+5. **跨周上下文**：`load_last_report_section()` 从 Obsidian 最近一期报告取该公司节（`## {zh}` 到下一个 `---` 或 `## `，截至 `synth.last_week_chars=3000`），注入合成 prompt，要求不重复上周内容。iCloud vault 的 `glob` 遇 `InterruptedError`/`EINTR` 短重试，耗尽返回 `""`，不打死整轮（issue #15，PITFALLS #30）
+6. **采集**（`collect_company`）：
+   - 东方财富公告：`entity_map` 里每个带 `filings` 代码的主体拉一次公告列表（A 股/港股按代码位数选 `ann_type`），窗口内保留
+   - Exa：按 `exa.queries` 顺序查 4 次，每次 `num_results=20`、正文 `max_characters=2000`、`startPublishedDate` = 窗口起点，不带 `category`。`综合媒体` 用 `includeDomains=exa.media_domains`（33 个财经与行业媒体），`综合开放`、`数字化运营`、`战略竞争` 用 `excludeDomains=blocked_domains`。`综合*` 不打维度标签，其余以查询名为维度。未在 `entity_map` 里的公司只跑两个 `综合*` 查询
+   - 正文不足 300 字的 Exa 结果记为 `headline`，只参与清洗，不进合成材料
+   - 所有调用都出错才视为本家失败（不写 fetch_log，下次重试）
+7. **清洗**（`clean_company`）：发布日期在 `window_days=8` 内（无日期丢弃）→ 未见过（`seen_urls`）→ 非农场页/屏蔽域名 → 公告排除例行类（`filings.routine_patterns`），报道排除低价值标题（`low_value_patterns`）→ 报道须命中集团或下属主体别名（`exclude` 词先剔除，`require_comention` 主体须同时命中集团别名）→ 标题二元组 Jaccard ≥ 0.6 聚类，每簇留一条（公告 > 正文报道 > 标题，同级取最早）
+8. **两段式分类**（`classify_two_stage`）：每批 40 条，`anthropic/claude-haiku-5.5` 初筛与 `openai/gpt-6-luna` 复核各给 keep/mention/promo/unrelated，取更严的标签，只留 keep 与 mention；任一模型失败则该批丢弃并计入 `classify_failed`
+9. **公告正文**：按时间倒序取前 `filings.bodies_max=10` 条拉东方财富正文（去掉港股免责声明头）
+10. **知识库注入**：`memory_context.py` 调 bridge 拉 MemPalace 语义搜索 + Obsidian 全文搜索背景，标为"仅供背景参考，不是本周事实"
+11. **组材料**（`build_material`）：【集团范围】、【公司公告】（≤10，带正文的附 2500 字）、【报道·正文】（keep 在前、同组按时间倒序，≤15 篇，每篇 1800 字，带来源层级与维度）、【行业与竞争】（≤3 篇正文）。只有标题或正文为空的报道一律不进材料
+12. **合成**（`compose_section`，全部走 OpenRouter）：
+    - 起草：Haiku 5.5，`reasoning.effort=medium`，`max_tokens=16000`，全文 ≤500 字；`finish_reason=length` 的截断稿丢弃，以 `low` 重试一次，仍失败则本节跳过
+    - 核查：Luna，`effort=medium`，`response_format=json_object`；要求草稿里每个数字、日期、人名、金额都能在材料里找到原文依据，日期/主体/出处错配也算错，问题分 `unsupported`/`contradicted`
+    - 修订：有问题时 Haiku `effort=low` 只改被标出的句子，能按材料更正就更正，否则删掉；核查调用失败时保留草稿
+    - 留档：每家写 `logs/audit-<运行时间>-<公司>.md`（材料、草稿、核查意见、终稿四节），30 天后随日志清理；写入失败只记 warning
+13. **输出**：Obsidian 存档带 frontmatter、采集/模型说明、费用和任务 ID；邮件与 Slack 只有标题、各公司节和 footer，公司之间一条分隔线
+14. **样文模式**（`--sample`）：不写 Obsidian、`seen_urls`、`fetch_log`，不发 Telegram/Slack，邮件标题带 `[样文]` 并发给全部收件人
+15. **日志**：每家一行 `FUNNEL {...}`（raw_eastmoney/raw_exa、各过滤层计数、分类结果、material_chars）；每次运行结束（含无新情报、异常、无公司配置）在 `finally` 里写一行 `COST total=$… openrouter=$… exa=$…`
+16. **失败隔离**：单家异常记入"跳过"并继续；全家失败且无 sections 时抛错非零退出，不发「无新情报」
 
 ---
 
@@ -127,101 +131,81 @@
 
 | 脚本 | 职责 |
 |------|------|
-| `run_intel.py` | 情报主循环入口，协调搜索/去重/LLM/输出；末尾并列投递邮件、Telegram、Slack |
+| `run_intel.py` | 情报主循环入口：行业上下文、逐家采集/清洗/分类/合成、输出与投递、FUNNEL 与 COST 日志；`--force`/`--sample`/`--recipients` |
+| `intel_sources.py` | 东方财富公告列表与正文、Exa 查询；`collect_company()`/`collect_industry()`；`SourceStats` 记调用数、错误数、Exa 费用 |
+| `intel_clean.py` | 窗口、农场、例行公告、低价值、集团别名归属、标题聚类去重；`classify_two_stage()` 两段式分类 |
+| `intel_synth.py` | `build_material()` 组材料；`compose_section()` 起草/核查/修订与留档；三个 prompt |
+| `config/intel_rules.yaml` | 信源、过滤、材料上限、模型与推理强度等全部规则 |
+| `config/entity_map.yaml` | 集团 → 上市主体/子公司/品牌/参股，别名、排除词、公告代码、所属行业（草稿，待负责人确认） |
 | `email_check.py` | 邮件轮询、指令解析与执行（launchd 已停用 2026-10-08，可手动运行） |
 | `email_sender.py` | Resend API 封装，Markdown → HTML |
 | `slack_sender.py` | Slack 发送：md_to_slack 转换 + 超长分块串 thread；`post_report()` 读 `SLACK_MI_CHANNEL` |
 | `slack_check.py` | Slack 轮询（launchd 每 5 分钟，已停用 2026-10-08）：thread 回复 bot 消息 或 `mi: ` 前缀 → followup pipeline |
-| `search_utils.py` | 三级搜索 fallback（Tavily→SerpApi→Serper） |
+| `search_utils.py` | 追问用三级搜索 fallback（Tavily→SerpApi→Serper）；周报不再使用 |
 | `config_store.py` | watchlist.md + intel_config.yaml 读写 |
-| `dedup_utils.py` | L2 Jaccard 去重 + L3 MemPalace 语义去重 |
-| `article_cache.py` | 文章全文缓存（90天TTL） |
-| `http_utils.py` | httpx 重试封装（网络错误/5xx 重试，4xx 不重试）；`call_llm_json()` 统一封装"调用 LLM + 取值 + 解析 JSON"，仅对坏输出（非网络问题）重试，见下方"LLM JSON 输出解析"一节 |
-| `memory_context.py` | 每公司 LLM 前注入历史上下文（bridge REST）：三路 MemPalace 语义搜索 + Obsidian 全文搜索 |
-| `hermes_footer.py` | 邮件 footer（下次轮询时间提示） |
+| `http_utils.py` | httpx 重试封装（网络错误/5xx 重试，4xx 不重试）；`extract_llm_text()`；`call_llm_json()` 统一封装"调用 LLM + 取值 + 解析 JSON"，仅对坏输出重试 |
+| `memory_context.py` | 每公司合成前注入历史上下文（bridge REST）：三路 MemPalace 语义搜索 + Obsidian 全文搜索 |
+| `hermes_footer.py` | 邮件 footer |
+| `log_utils.py` | `setup_logging()`：`~/MI/logs/` 下 `TimedRotatingFileHandler`，30 天滚动；`LOG_DIR` 下 30 天前的文件（含 audit）启动时清理 |
+| `article_cache.py` / `dedup_utils.py` | 旧管线的文章缓存与 L2/L3 去重，周报已不调用；`test_dedup.py`、`run_intel_deepseek_test.py` 仍引用 |
+| `manual_send_test_email.py` | 手动发测试邮件（原 `test_email.py`，改名防 pytest 收集时真实发信） |
+| `test_intel_*.py` / `test_run_intel_pipeline.py` / `test_eintr_retry.py` / `test_jmap_config.py` / `test_no_send_on_import.py` | 单测（全部离线，不调网络） |
 | `gmail_client.py` | **DEPRECATED** — Gmail OAuth2 封装，不再使用 |
-| `test_dedup.py` | 去重系统离线校准工具 |
-| `test_email.py` | 邮件系统手动测试工具 |
-| `test_prefilter.py` / `test_eintr_retry.py` / `test_jmap_config.py` | 单测：prefilter 门控、iCloud EINTR 重试、JMAP 配置 fail-fast |
-| `log_utils.py` | `setup_logging()`：`~/MI/logs/` 下 `TimedRotatingFileHandler`，30 天滚动 |
 | `sama_relay.py` | 把 `PhysicalClue611/PC611-homepage` 中标题含 `[sama]` 的最早一条 open issue 转发成邮件，成功后 close；launchd `com.mi.sama-relay` 已停用 |
-| `run_intel_deepseek_test.py` | 一次性测试脚本（V4 Flash 全量分析，发 `TEST_RECIPIENT`），非生产路径 |
+| `run_intel_deepseek_test.py` | 一次性测试脚本（旧管线），非生产路径 |
 
 ---
 
 ## 去重架构
 
-| 层 | 机制 | 状态 | 文件 |
-|---|---|---|---|
-| 日期过滤 | `_parse_pub_date()` 解析多格式，> 9天丢弃 | 运行中 | `run_intel.py` |
-| L1 URL | `seen_urls.json` 90天TTL | 运行中 | `run_intel.py` |
-| L2 标题 Jaccard | 阈值 0.45，年份保留，比对历史 `article_cache.json` | 运行中 | `dedup_utils.py` |
-| L2.5 Gemma 31B IT（OR, reasoning off） | 时效/相关性/跨周去重（注入上周报告）/信息量，`max_tokens=4096`，`response_format=json_object` | 运行中 | `run_intel.py` |
-| L3 MemPalace 语义 | BM25+cosine 混合，`source_contains='china-companies'` | 未启用 | `dedup_utils.py` |
+| 层 | 机制 | 位置 |
+|---|---|---|
+| 时间窗 | 发布日期在 `window_days=8` 内；无日期一律丢弃；Exa 请求本身也带 `startPublishedDate` | `intel_clean.in_window` |
+| URL | `seen_urls.json` 90 天 TTL，正式运行把本周进入分类后的公告与报道 URL 写回 | `run_intel.py` |
+| 本周聚类 | 标题二元组 Jaccard ≥ 0.6（或标题相同）并查集聚类，每簇留一条 | `intel_clean.dedupe` |
+| 跨周 | 上周本节注入合成 prompt，要求只写新进展 | `load_last_report_section()` |
 
-**日期解析覆盖格式**：ISO `2026-05-20T...` / 中文绝对 `2025年3月25日` / 中文相对 `3天前`、`2周前`、`1个月前` / 英文相对 `3 days ago`、`2 weeks ago`。无法解析则 pass-through（不丢弃）。
-
-**跨周去重机制**：`load_last_report_section()` 直接读 Obsidian 历史文件提取公司节（`## {zh}` → 首个 `---`），注入 prefilter prompt，指示模型剔除与上周内容高度重叠的文章。不依赖 MemPalace bridge，更可靠。列目录对 iCloud Drive 做 EINTR 短重试，耗尽则跳过本家上周节。
-
-**L3 启用条件**：积累 3 个月以上历史报告后，可在 `run_intel.py` 启用 `find_report_duplicate()` 作为独立层叠加。
+旧管线的 `article_cache.json` L2 去重、Gemma prefilter、MemPalace L3 均已不在周报路径上。
 
 ---
 
 ## LLM 模型选型
 
-| 场景           | 模型                    | 路由              | 原因                       |
-| ------------ | --------------------- | --------------- | ------------------------ |
-| 情报主合成        | `deepseek-v4-pro`     | DeepSeek 直连 API | 深度推理，`reasoning_effort=high`，成本 ~$0.435/$0.87/M |
-| Prefilter 门控 | `google/gemma-4-31b-it` | OpenRouter | 零推理结构化门控，`reasoning.enabled=false`；Crusoe/Friendli/OpenInference，ignore Together，`allow_fallbacks=false` |
-| 邮件指令解析       | `openai/gpt-oss-20b`  | OpenRouter      | 响应快，指令理解准确               |
-| 英文名推断        | `openai/gpt-oss-20b`  | OpenRouter      | 同上                       |
-| Followup 推理  | `deepseek-v4-pro`     | DeepSeek 直连 API | 深度推理，`reasoning_effort=high` |
+| 场景 | 模型 | 路由 | 参数 |
+|---|---|---|---|
+| 分类初筛 | `anthropic/claude-haiku-5.5` | OpenRouter | `reasoning.effort=low`，`json_object`，批 40 |
+| 分类复核 | `openai/gpt-6-luna` | OpenRouter | 同上，两者取严 |
+| 周报起草 / 修订 | `anthropic/claude-haiku-5.5` | OpenRouter | 起草 `medium`、修订 `low`、截断重试 `low`，`max_tokens=16000` |
+| 事实核查 | `openai/gpt-6-luna` | OpenRouter | `medium`，`json_object` |
+| 邮件指令解析 / 英文名推断 | `openai/gpt-oss-20b` | OpenRouter | 响应快 |
+| Followup 推理 | `deepseek-v4-pro` | DeepSeek 直连 | `reasoning_effort=high` |
 
-**DeepSeek content=null 处理**：推理模型先写 `reasoning_content` 字段，`content` 可能为空。所有 DeepSeek 调用点统一调用 `http_utils.extract_llm_text(msg)`（`content or reasoning_content or reasoning`），不再各自手写取值链——`prefilter_articles()` 曾因手写链漏掉 `reasoning_content` 导致门控静默 pass-through（2026-07-15，issue #10）
+负责人决定：起草用 Haiku、核查用 Luna，不用 Claude Sonnet/Opus（成本）。模型与强度都在 `config/intel_rules.yaml` 的 `classify`/`synth` 下。
 
-**LLM JSON 输出解析（`http_utils.call_llm_json()`）**：所有要求模型输出 JSON 的调用点（`prefilter_articles()`、`_parse_command()`、`_followup_three_stage()` stage1）统一调用 `call_llm_json(url, *, headers, json_body, timeout, logger, label, max_attempts=2)`，内部把"取字典字段 + 解析 JSON"收进同一个 try/except，校验解析结果为 dict，且只在"调用成功但输出质量差"（缺字段/空内容/解析失败/非 dict）时重试，网络层失败（`post_with_retry` 已内部重试）不再套第二层重试。三处调用点均带 `response_format: {"type": "json_object"}`，从 API 层面约束输出格式（DeepSeek 和 OpenRouter/`gpt-oss-20b` 均已验证支持）。不要在新调用点各自手写取值/解析/重试逻辑（2026-07-19，issue #13，事故详情见 `PITFALLS.md` #29）
+**费用记录**：OpenRouter 调用带 `usage: {include: true}`，`usage.cost` 累加；Exa 取响应 `costDollars.total`（为 null 记 0）。两者在 COST 行与 Obsidian 存档头里合计。
+
+**推理模型取值**：所有调用点统一 `http_utils.extract_llm_text(msg)`（`content or reasoning_content or reasoning`）。
+
+**LLM JSON 输出解析（`http_utils.call_llm_json()`）**：所有要求 JSON 的调用点（分类、核查、`_parse_command()`、`_followup_three_stage()` stage1）统一走 `call_llm_json`，带 `response_format: {"type": "json_object"}`，只在"调用成功但输出质量差"时重试，网络层失败不再套第二层重试（issue #13，PITFALLS #29）。
 
 ---
 
 ## 搜索与内容获取层
 
-### 主搜索：三级 fallback（`search()`）
+### 周报信源
 
-前一级失败自动降级，全部失败抛 `RuntimeError`。
+| 信源 | 用法 | 费用 |
+|---|---|---|
+| 东方财富公告 | `np-anotice-stock.eastmoney.com/api/security/ann` 列表 + `np-cnotice-stock.eastmoney.com/api/content/ann` 正文 | 免费 |
+| Exa `/search` | `type=auto`，不带 `category`；白名单查询用 `includeDomains`，其余用 `excludeDomains`；`contents.text.maxCharacters=2000` | `auto` 每千次 $7（含 10 条）+ 超出部分每千条 $1，20 条约 $0.017/次，正文不另计；免费层每月 $10（2026-10-23 官方定价页） |
 
-| 级别 | Provider | 参数 | 限额 |
-|------|---------|------|------|
-| 1 | Tavily | `topic=general, days=8, max_results=8`，返回 `published_date` | 10次/日 |
-| 2 | SerpApi | Google 搜索，`num=8` | 250次/月 |
-| 3 | Serper.dev | Google 搜索，`num=8` | 按量 |
+每周约 6 家 × 4 + 6 行业 × 1 ≈ 30 次 Exa。2026-10-23 样文实测一次运行 `exa=$0.426`、`openrouter=$0.099`。
 
-### 补充搜索：中文新闻（`search_cn()`）
+**选型依据与未尽事宜**见仓库 `docs/playbooks/intel_source_evaluation.md`：Google News RSS 只有标题、导致"把标题写成事实"，已弃用；Serper/SerpApi News 同一索引；Tavily 中文无效；Parallel 日期缺失多、只有前 10 条带摘录，不用；国内 AI 搜索 API（博查、智谱、千帆、秘塔）未测。
 
-失败返回 `[]`（非致命），Serper News → SerpApi News fallback。
+### 追问用搜索（`search_utils.py`，周报不用）
 
-| 级别 | Provider | 参数 | 说明 |
-|------|---------|------|------|
-| 1 | Serper News | `POST /news, hl=zh-cn, gl=cn` | 新浪财经/东方财富/腾讯财经/界面新闻等，带发布日期 |
-| 2 | SerpApi News | `tbm=nws, hl=zh-CN, tbs=qdr:w` | Google 新闻，过去一周 |
-
-### 全文提取：Jina Reader（`_jina_extract()`）
-
-`GET https://r.jina.ai/{url}`，header `Authorization: Bearer JINA_API_KEY`，返回 markdown 全文。
-
-- **触发条件**：无 `published_date` 的文章（英文 Tavily 结果，snippet ~300字）
-- **不触发**：Serper News 中文文章（有日期，snippet 已够定位）
-- **上限**：每公司 `JINA_ENRICH_MAX=5` 次，避免超速率
-- **失败处理**：静默回退到原始 snippet（paywall / 反爬 / 404 均正常失败）
-- **内容截断**：Jina 全文存入 cache（`JINA_CACHE_CHARS=4000`），传给 LLM 截至 `JINA_LLM_CHARS=2000`；普通 snippet 仍用 500 字
-
-### 时效控制
-
-- **方案 A**：`SEARCH_DAYS = 8`（Tavily 索引窗口）
-- **方案 B**：`_parse_pub_date()` 解析多格式发布日期，> `PUB_DATE_MAX_AGE=9` 天丢弃；无法解析 pass-through
-
-**关键限制**：Tavily `days` 过滤的是**再索引时间**，不是文档发布日期。旧文章被重新爬取后仍在窗口内，必须靠方案 B 的日期解析二次过滤。
-
-**Tavily topic 注意**：必须用 `topic=general`，`topic=news` 对中文公司名查询返回完全不相关英文新闻。
+`search()`：Tavily（`topic=general, days=8`）→ SerpApi → Serper，前一级失败自动降级。Tavily 必须用 `topic=general`，`topic=news` 对中文公司名返回无关英文新闻；`days` 过滤的是再索引时间，不是发布日期。
 
 ---
 
@@ -277,6 +261,8 @@ you@example.com
 
 **writer 注意**：四状态机（pre→companies→recipients→post），只替换受控区块，frontmatter 和其他内容不动。
 
+**集团映射与采集规则**：watchlist 里的公司名对应 `config/entity_map.yaml` 的集团键（主体、别名、排除词、公告代码、行业）；未映射的公司只用中英文名做两次综合 Exa 查询。全部过滤与模型参数在 `config/intel_rules.yaml`。
+
 ---
 
 ## MemPalace Bridge API（port 8765）
@@ -323,49 +309,58 @@ MI 脚本通过 `http://localhost:8765` 访问。
 
 | 变量 | 用途 |
 |------|------|
-| `OPENROUTER_API_KEY` | LLM 调用（prefilter Gemma 31B IT；邮件指令 gpt-oss-20b） |
-| `DEEPSEEK_API_KEY` | LLM 调用（deepseek-v4-pro 直连合成；prefilter 已不走 DeepSeek） |
-| `TAVILY_API_KEY` | 情报抓取主力（10次/日） |
-| `SERPAPI_API_KEY` | Tavily 耗尽后备用（250次/月） |
-| `SERPER_API_KEY` | 三级 fallback（Serper.dev） |
+| `EXA_API_KEY` | 周报 Exa 采集（必需，缺失即 `IntelConfigError`） |
+| `OPENROUTER_API_KEY` | 周报分类/起草/核查/修订；邮件指令 gpt-oss-20b（必需） |
+| `PARALLEL_API_KEY` | Parallel Search，2026-10-23 评估后未接入代码，仅保留 |
+| `DEEPSEEK_API_KEY` | Followup 推理（deepseek-v4-pro 直连）；周报不用 |
+| `TAVILY_API_KEY` / `SERPAPI_API_KEY` / `SERPER_API_KEY` | 追问搜索三级 fallback；周报不用 |
+| `JINA_API_KEY` | 旧管线全文提取，周报不用（账户无余额，2026-10-23 搜索接口返回 402） |
 | `RESEND_API_KEY` | 邮件发送（`re_...`，永久有效） |
-| `RESEND_STATUS_KEY` | 送达/退信状态查询（Full access，与发信 key 分离，`sama_relay.py` 用） |
+| `RESEND_STATUS_KEY` | 送达/退信状态查询（Full access，与发信 key 分离） |
 | `FROM_ADDRESS` | 发件地址（缺失会导致发信静默失败，见开发日志 2026-07-06） |
 | `STALWART_API_KEY` | JMAP 收信认证（`API_...`，永久有效） |
 | `JMAP_BASE` / `JMAP_ACCOUNT_ID` / `JMAP_INBOX_ID` | JMAP 服务器地址、账号 ID、INBOX ID（缺失即 `JMAPConfigError`） |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot（`{bot_id}:{secret}`） |
 | `TELEGRAM_ALLOWED_USERS` | 允许接收通知的用户 chat ID（逗号分隔） |
 | `TELEGRAM_HOME_CHANNEL` | 通知目标 chat（优先；缺省取 `TELEGRAM_ALLOWED_USERS` 第一个） |
-| `HERMES_DATA` | 数据目录，默认 `~/MI/data` |
-| `JINA_API_KEY` | Jina Reader 全文提取（`jina_...`，免费 500 RPM） |
-| `OBSIDIAN_PATH` | Obsidian vault 绝对路径 |
+| `HERMES_DATA` | 数据目录，默认 `~/MI/data`（必需） |
+| `OBSIDIAN_PATH` | Obsidian vault 绝对路径（必需） |
 | `SLACK_BOT_TOKEN` | Slack Bot Token，与 Hermes 共用（`xoxb-...`） |
 | `SLACK_MI_CHANNEL` | Slack 投递频道 ID（`C0B5X97Q879`，`#china-corp-intel`） |
 | `SLACK_ALLOWED_USERS` | 允许发 MI 追问的 Slack user ID（逗号分隔） |
-| `GITHUB_TOKEN` | `sama_relay.py` 读写 GitHub issue |
+| `GITHUB_TOKEN` | GitHub REST（`sama_relay.py`；仓库操作一律用它，不用 gh CLI） |
+| `GITHUB_REVIEWER_TOKEN` | 评审账号（blacktomb42）提交 PR review |
 
 ---
 
 ## 关键常量与阈值
 
+周报相关的全部在 `config/intel_rules.yaml`：
+
+| 键 | 值 |
+|---|---|
+| `window_days` | 8 |
+| `exa.num_results` / `exa.max_characters` | 20 / 2000 |
+| `exa.media_domains` | 33 个 |
+| `filings.bodies_max` / `filings.body_chars` | 10 / 2500 |
+| `material.filings_max` / `bodies_max` / `body_chars` / `industry_bodies_max` | 10 / 15 / 1800 / 3 |
+| `classify.batch_size` / `reasoning_effort` | 40 / low |
+| `synth.draft_effort` / `check_effort` / `revise_effort` / `retry_effort` | medium / medium / low / low |
+| `synth.max_tokens` / `last_week_chars` | 16000 / 3000 |
+| 本周聚类 Jaccard | 0.6（`intel_clean.dedupe`） |
+| Exa 正文判为 article 的下限 | 300 字（`intel_sources.fetch_exa`） |
+
+其他：
+
 | 常量 | 值 | 位置 |
 |------|----|------|
-| `SEARCH_DAYS` | 8 | `run_intel.py` |
-| `PUB_DATE_MAX_AGE` | 9 天 | `run_intel.py` |
-| `JINA_ENRICH_MAX` | 5 条/公司 | `run_intel.py` |
-| `JINA_CACHE_CHARS` | 4000 | `run_intel.py` |
-| `JINA_LLM_CHARS` | 2000 | `run_intel.py` |
 | `SEEN_URL_TTL_DAYS` | 90 | `run_intel.py` |
-| L2 Jaccard 阈值 | 0.45 | `dedup_utils.py:find_cache_duplicate()` |
-| L3 语义阈值 | 0.65 | `dedup_utils.py:find_report_duplicate()` |
-| Prefilter max_tokens | 4096 | `run_intel.py:prefilter_articles()` |
-| Synthesis max_tokens | 8000 | `run_intel.py:synthesize_with_llm()` |
-| Followup stage1 max_tokens | 2048 | `email_check.py:_followup_three_stage()` |
-| Followup stage3 max_tokens | 2000 | `email_check.py:_followup_three_stage()` |
+| `EINTR_MAX_ATTEMPTS` | 4 | `run_intel.py` |
+| 日志与留档保留 | 30 天 | `log_utils.py` |
+| Followup stage1 / stage3 max_tokens | 2048 / 2000 | `email_check.py:_followup_three_stage()` |
 | JMAP 游标重叠窗口 | 10 分钟（游标缺失时退化为 24 小时） | `email_check.py:CURSOR_OVERLAP_MINUTES` |
 | processed_ids TTL | 72 小时 | `email_check.py:_load_processed_ids()` |
 | KB context 上限 | 1500 字 | `memory_context.py` |
-| 历史 context 条数上限 | 8 条 | `run_intel.py` |
 
 ---
 
@@ -375,7 +370,7 @@ MI 脚本通过 `http://localhost:8765` 访问。
 |------|------|------|-----|
 | `seen_urls.json` | 已处理 URL | `{url: {ts, company}}` | 90天 |
 | `fetch_log.json` | 每公司每日抓取记录 | `{zh: date_str}` | 无，按日覆盖 |
-| `article_cache.json` | 文章全文缓存（含 Jina 丰富后内容） | **flat dict** `{url: {title, content, company, ts}}` | 90天 |
+| `article_cache.json` | 旧管线文章缓存，周报不再读写 | flat dict | 90天 |
 | `processed_email_ids.json` | 已处理邮件 ID | `{id: ts}` | 72小时 |
 | `jmap_cursor.json` | JMAP 轮询游标（最新 `receivedAt`） | JSON | 无 |
 | `processed_slack_ts.json` | 已处理 Slack 消息 ts | `{ts: t}` | 72小时 |
@@ -384,37 +379,49 @@ MI 脚本通过 `http://localhost:8765` 访问。
 | `intel_config.yaml` | 公司+收件人 fallback 配置 | YAML | 无 |
 | `email_actions.log` | 邮件指令执行日志（追加） | 文本 | 无 |
 
+`~/MI/logs/` 下另有 `intel.log`（FUNNEL/COST）和 `audit-<运行时间>-<公司>.md`（材料/草稿/核查/终稿），30 天清理。
+
 ---
 
 ## 已知行为与边界情况
 
-**推理模型 content=null / 空内容**：推理模型可能在 reasoning 阶段耗尽 token 导致 `content` 为空，或围栏内容为空。prefilter 曾用 DeepSeek V4 Flash 频繁触发，2026-09-01 起改用 Gemma 31B IT + reasoning off（PITFALLS.md #31）；合成与 followup 仍用 V4 Pro，取值统一走 `extract_llm_text()`，JSON 调用统一走 `call_llm_json()`（自动重试坏输出 + 诊断日志 raw 原文）。仍属已知风险——LLM 输出本身是概率性的，无法保证归零。
+**只有标题的条目不进材料**：2026-10-23 第二版样文把十几条 Google News 标题（丁少翔进亚玛芬董事会）写成确定事实且日期写错，核查也没拦住（PITFALLS #34）。现在 Google News 已移除，Exa 正文不足 300 字、或正文为空的报道一律不进合成材料。
 
-**Tavily `days` 过滤的是索引时间**：旧文章被重新爬取后仍出现在窗口内，必须靠 `_parse_pub_date()` + `PUB_DATE_MAX_AGE` 二次过滤。
+**推理模型截断**：`finish_reason=length` 的生成一律丢弃，不返回半截文字（2026-10-23 样文曾把半截比亚迪一节发出）。
 
-**Jina paywall / 反爬失败**：主流英文财经媒体（Reuters、SCMP、Bloomberg、Yahoo Finance、Moomoo）对 Jina 有 paywall 或反爬保护。`_jina_extract()` 仅在 `len(full_text) > len(original_snippet)` 时才替换，防止无效页面替换有意义的原始 snippet。
+**根目录 `test_*.py` 不得有模块级副作用**：pytest 收集时会 import 执行。旧 `test_email.py` 因此给全部收件人真实发过信（PITFALLS #33），已改名 `manual_send_test_email.py`，`test_no_send_on_import.py` 守护。
 
-**无日期文章不等于可保留**：Prefilter prompt 明确要求"无日期文章需根据内容判断时效，不得默认保留"。
+**`--force` 模式**：不查也不写 `seen_urls.json`，不查 fetch_log，不注入上周本节；仍写 Obsidian 并投递。
 
-**`--force` 模式行为**：不检查 `seen_urls.json`；不写回 `seen_urls.json`；跳过 L2 title dedup。**但仍会写入 `article_cache.json`**。多次 `--force` 运行会累积 cache 条目，影响后续正式运行的 L2 去重。
+**`--sample` 模式**：除邮件外无任何持久副作用（`seen_urls` 加载时也不回写过期清理），邮件发给全部收件人。
 
-**dry run 后重跑的正确清除步骤**：
-1. `fetch_log.json` 今日条目
-2. `seen_urls.json` 今日写入条目（按 `ts >= today_ts` 过滤）
-3. `article_cache.json` 今日写入条目（按 `ts >= today_ts` 过滤，flat dict 结构）
-4. Obsidian 今日报告文件
+**正式运行后重跑的清除步骤**：`fetch_log.json` 今日条目、`seen_urls.json` 今日写入条目（按 `ts >= today_ts`）、Obsidian 今日报告文件。
 
 **异步线程必须 daemon=False**：launchd 在 `run_email_check()` 返回后立即 exit，daemon 线程会被 kill。所有后台线程收集到模块级 `_background_threads`，函数末尾 join + clear。
 
-**Slack 追问同样先确认投递再标记处理**：`slack_check.py` 有效追问路径先跑 pipeline + `post_message`，仅当 `post_message` 返回非空 ts 才写 `processed_slack_ts`/游标；跳过类消息（机器人/非白名单/父消息非 bot）无副作用，标记时机不变（2026-07-15，issue #8）。
+**Slack 追问同样先确认投递再标记处理**：`slack_check.py` 有效追问路径先跑 pipeline + `post_message`，仅当 `post_message` 返回非空 ts 才写 `processed_slack_ts`/游标（2026-07-15，issue #8）。
 
-**关键 env 缺失一律 fail-fast**：`email_check.py`（`JMAPConfigError`）、`run_intel.py`（`IntelConfigError`：`TAVILY_API_KEY`/`DEEPSEEK_API_KEY`/`OPENROUTER_API_KEY`/`HERMES_DATA`/`OBSIDIAN_PATH`）、`slack_check.py`（`SlackConfigError`：`SLACK_BOT_TOKEN`/`SLACK_MI_CHANNEL`）均在入口函数最开头校验必需变量，缺失即抛专用异常，逃逸到 `__main__` 触发非零 exit，不再静默 `return` 让 launchd 误判为成功（2026-07-15，issue #11）。
+**关键 env 缺失一律 fail-fast**：`email_check.py`（`JMAPConfigError`）、`run_intel.py`（`IntelConfigError`：`EXA_API_KEY`/`OPENROUTER_API_KEY`/`HERMES_DATA`/`OBSIDIAN_PATH`）、`slack_check.py`（`SlackConfigError`：`SLACK_BOT_TOKEN`/`SLACK_MI_CHANNEL`）均在入口函数最开头校验，缺失即抛专用异常，非零 exit（2026-07-15，issue #11）。
 
 **Resend 域名限制**：只能从 `@physicalclue.us` 根域发信，`@send.physicalclue.us` 子域未验证（返回 403）。
 
 **JMAP messageId 格式**：Stalwart 返回的 messageId 已剥除 `<>`，发送 `In-Reply-To` header 时需手动补齐：`f"<{msg_id}>"`。
 
 **bot_user_id ≠ chat_id**：Telegram Bot token 前缀（冒号前）是 bot 自身 ID，不是用户 chat ID。用户 chat ID 来自 `TELEGRAM_ALLOWED_USERS`。
+
+---
+
+## 已知问题与待观察（2026-10-23）
+
+负责人决定：新管线先运行一段时间，再决定是否继续优化。以下问题已记录、暂不修：
+
+1. **篇幅超限**：prompt 要求全文 ≤500 字，2026-10-23 样文终稿安踏 721 字符、徐工 691，其余 510–580。修订只逐句改，不压缩全文。
+2. **修订句措辞**：修订后的句子会出现"材料未显示……""所列报道未提及……"这类材料说明式措辞，违反写作规范。原因是 `REVISE_INSTRUCTION` 不带 `SYSTEM_PROMPT` 的写法要求。
+3. **集团映射待确认**：`config/entity_map.yaml` 是草稿。子公司/品牌不再单独查询，只靠别名归属；若子公司动态漏得多，再考虑按实体加 Exa 查询。
+4. **规模与成本**：扩到 10 家前要先解决时间（串行约 13 分钟）和成本；Exa 每月约 $2，免费层够用。
+5. **信源**：某家连续几周材料过薄时，按 `docs/playbooks/intel_source_evaluation.md` 的基准评估国内 AI 搜索 API。
+
+观察方法：每周看 `intel.log` 的 FUNNEL 与 COST，抽查 `logs/audit-*.md` 的核查意见与终稿。
 
 ---
 
