@@ -195,3 +195,17 @@ Requesting LWCR update on next spawn
 - **改 LaunchAgent 实际执行的二进制（换 venv、换解释器、`brew` 换了 venv `home` 指向的实体）不等于"plist 没改就无影响"**，每个 job 的首次启动会被系统拦一次。切换后要主动核对每个 job 的首次运行，而不是假设下次触发自动生效。
 - kickstart 之前要确认约束确实还没更新（job 自切换以来从未启动过）；否则 kickstart 会完整执行一次真实任务。
 - 失败发生在 Python 之前，Python logging 与 plist 的 stdout/stderr 兜底都不会有痕迹，排查入口是 `launchctl list`/`launchctl print` 的退出码与 `/usr/bin/log show`。
+
+### 33. pytest 收集根目录 `test_email.py` 时真实给全部收件人发信（已修复 2026-10-23，issue #23 / PR #24）
+2026-10-23 在 `~/MI` 跑 `pytest -q` 时，全部收件人收到一封"确认 Gmail API"测试邮件。`test_email.py` 是手动测试工具，发信逻辑写在模块顶层；pytest 按 `test_*.py` 收集时会 import 该文件，import 即执行发信。
+
+**修复**：改名 `manual_send_test_email.py`（不再被收集），新增 `test_no_send_on_import.py` 守护"import 任何根目录模块都不发信"。
+
+**教训**：根目录下 `test_*.py` 一律当成会被 pytest import 的模块，不能有模块级副作用（发信、调付费 API、写生产数据）；手动工具不要用 `test_` 前缀。修复只在分支上时，主检出仍有旧文件，合并前不能在主目录跑 pytest。
+
+### 34. Google News 只有标题的条目被合成写成确定事实，事实核查也没拦住（已修复 2026-10-23，issue #25）
+2026-10-23 第二版样文安踏一节写"10月21日，丁少翔进入亚玛芬董事会，安踏系占11席中的6席"。材料里这件事只有十几条 Google News 标题、没有正文，标题日期是 10-20；起草模型把标题当事实展开，日期还错配到另一件事的"当日"。Luna 核查虽有 `title_only_as_fact` 类型，仍未标出。Google News 占原始条目约 90%（比亚迪 805/835），全部只有标题。
+
+**修复**：删除 Google News，采集只用东方财富公告 + Exa（白名单媒体、开放、两个维度查询，均带正文）；合成材料只收公告与正文报道，正文不足 300 字的条目不进材料；核查 prompt 要求每个数字、日期、人名、金额都能在材料里找到原文依据，日期/主体/出处错配算错；修订时无法更正的句子删掉；每家材料与核查意见留档 `logs/audit-*.md`。信源评估见 `docs/playbooks/intel_source_evaluation.md`。
+
+**教训**：靠 prompt 告诉模型"标题只能当线索"挡不住幻觉，最可靠的做法是不给它只有标题的材料。核查环节对"把线索升格为事实"这类错误的检出率低，治本在材料层。留档材料与核查意见是事后判断"这句话有没有依据"的唯一途径。
