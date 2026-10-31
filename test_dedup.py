@@ -111,7 +111,7 @@ def main():
                         help="Restrict MemPalace results to files containing this string "
                              "(default: china-companies). Pass empty string to search all.")
     parser.add_argument("--wing", default="paperview")
-    parser.add_argument("--room", default="general")
+    parser.add_argument("--room", default=None)
     parser.add_argument("--n-results", type=int, default=3)
     parser.add_argument("--bridge", default=DEFAULT_BRIDGE)
     parser.add_argument("--exclude-report-date", default=None, metavar="YYYY-MM-DD",
