@@ -17,7 +17,7 @@
 - **宿主机**：Mac，`~/MI/`
 - **Python**：3.14（Homebrew `python@3.14`），`~/MI/.venv/`（uv 管理）。换解释器后每个 LaunchAgent 首次启动会被 macOS Launch Constraint 杀一次，周任务须在下次触发前 `launchctl kickstart` 一次（PITFALLS.md #32）
 - **调度**：Mac launchd（无 Docker 容器介入）
-- **Bridge**：`~/.hermes/mempalace_bridge.py` 常驻，port 8765，宿主机直连
+- **Bridge**：`~/Homepage/hermes/mempalace_bridge.py` 常驻，port 8765，宿主机直连
 
 ---
 
@@ -267,7 +267,7 @@ you@example.com
 
 ## MemPalace Bridge API（port 8765）
 
-**Bridge 文件**：`~/.hermes/mempalace_bridge.py`（宿主机常驻，launchd `com.hermes.mempalace-bridge`）
+**Bridge 文件**：`~/Homepage/hermes/mempalace_bridge.py`（宿主机常驻，launchd `com.hermes.mempalace-bridge`）
 
 MI 脚本通过 `http://localhost:8765` 访问。
 
@@ -290,7 +290,7 @@ MI 脚本通过 `http://localhost:8765` 访问。
 | `com.hermes.emailcheck`（已停用 2026-10-08） | 每 5 分钟 | `~/MI/email_check.py` | `~/MI/logs/emailcheck.log`（30天滚动） |
 | `com.hermes.mi-slack-check`（已停用 2026-10-08） | 每 5 分钟 | `~/MI/slack_check.py` | `~/MI/logs/slack-check.log`（30天滚动） |
 | `com.mi.sama-relay`（已停用） | 每小时 | `~/MI/sama_relay.py` | `~/MI/logs/sama_relay.log` |
-| `com.hermes.mempalace-bridge` | 常驻 | `~/.hermes/mempalace_bridge.py` | `/tmp/hermes_mempalace_bridge.log` |
+| `com.hermes.mempalace-bridge` | 常驻 | `~/Homepage/hermes/mempalace_bridge.py` | `/tmp/hermes_mempalace_bridge.log` |
 
 停用的 plist 移在 `~/Library/LaunchAgents/.disabled/`，恢复时移回并 `launchctl bootstrap`。
 
