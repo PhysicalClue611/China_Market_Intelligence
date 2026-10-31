@@ -180,17 +180,18 @@ def test_body_only_material_and_prompts():
     ({'issues': [{'quote': '错误'}]}, '修订', '修订'),
     ({'issues': [{'quote': '错误'}]}, None, '草稿'),
 ])
-def test_audit_paths(tmp_path, check, revision, final):
+@pytest.mark.parametrize('kb', ['历史知识库背景', ''])
+def test_audit_paths(tmp_path, check, revision, final, kb):
     from intel_synth import compose_section
     path = tmp_path / 'audit.md'
     replies = [llm_response('草稿')]
     if check and check.get('issues'):
         replies.append(llm_response(revision) if revision else (None, 'failed'))
-    assert compose_section('海尔', '', '原始材料', '', '', RULES, post=Mock(side_effect=replies),
+    assert compose_section('海尔', '', '原始材料', '', kb, RULES, post=Mock(side_effect=replies),
                            call_json=Mock(return_value=check), audit_path=path) == final
     text = path.read_text(encoding='utf-8')
     opinion = '核查失败' if check is None else json.dumps(check, ensure_ascii=False)
-    assert text == f'## 材料\n\n原始材料\n\n## 草稿\n\n草稿\n\n## 核查意见\n\n{opinion}\n\n## 终稿\n\n{final}\n'
+    assert text == f'## 材料\n\n原始材料\n\n## 个人知识库背景\n\n{kb or "（无）"}\n\n## 草稿\n\n草稿\n\n## 核查意见\n\n{opinion}\n\n## 终稿\n\n{final}\n'
 
 
 def test_audit_draft_failure_and_write_failure(tmp_path, caplog):
@@ -198,7 +199,7 @@ def test_audit_draft_failure_and_write_failure(tmp_path, caplog):
     path = tmp_path / 'failed.md'
     assert compose_section('海尔', '', '原始材料', '', '', RULES,
         post=Mock(return_value=(None, 'failed')), call_json=Mock(), audit_path=path) is None
-    assert path.read_text(encoding='utf-8') == '## 材料\n\n原始材料\n\n## 草稿\n\n（无）\n\n## 核查意见\n\n（无）\n\n## 终稿\n\n（无）\n'
+    assert path.read_text(encoding='utf-8') == '## 材料\n\n原始材料\n\n## 个人知识库背景\n\n（无）\n\n## 草稿\n\n（无）\n\n## 核查意见\n\n（无）\n\n## 终稿\n\n（无）\n'
     assert compose_section('海尔', '', '材料', '', '', RULES,
         post=Mock(return_value=llm_response('草稿')), call_json=Mock(return_value={'issues': []}),
         audit_path=tmp_path / 'missing' / 'audit.md') == '草稿'
