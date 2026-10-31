@@ -96,7 +96,7 @@ def search_mempalace(
     query: str,
     bridge_url: str = _BRIDGE_DEFAULT,
     wing: str | None = "paperview",
-    room: str | None = "general",
+    room: str | None = None,
     source_contains: str | None = "china-companies",
     n_results: int = 3,
     timeout: int = 5,

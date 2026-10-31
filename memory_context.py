@@ -38,7 +38,7 @@ def _mempalace_search(
     bridge_url: str,
     query: str,
     wing: str = "paperview",
-    room: str = "general",
+    room: str | None = None,
     source_contains: str = "china-companies",
     n_results: int = 3,
     max_distance: float = 0.85,

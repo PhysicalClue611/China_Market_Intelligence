@@ -112,7 +112,8 @@ def compose_section(zh, en, material, last_week, kb, rules, post=post_with_retry
                 opinion = ('（无）' if not draft else '核查失败' if check is None
                            else json.dumps(check, ensure_ascii=False))
                 audit_path.write_text(
-                    f'## 材料\n\n{material}\n\n## 草稿\n\n{draft or "（无）"}'
+                    f'## 材料\n\n{material}\n\n## 个人知识库背景\n\n{kb or "（无）"}'
+                    f'\n\n## 草稿\n\n{draft or "（无）"}'
                     f'\n\n## 核查意见\n\n{opinion}\n\n## 终稿\n\n{result if result is not None else "（无）"}\n',
                     encoding='utf-8')
             except Exception as exc:
