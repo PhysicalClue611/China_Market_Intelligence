@@ -28,12 +28,29 @@ _RETRYABLE = (
 )
 
 
+# Owner rule 2026-11-03 (global OpenRouter policy): every OpenRouter request
+# must carry data_collection=deny. Enforced here because every MI OpenRouter
+# call goes through post_with_retry (directly or via call_llm_json).
+OPENROUTER_PREFIX = "https://openrouter.ai/"
+OR_DATA_POLICY = {"data_collection": "deny"}
+
+
+def enforce_or_policy(url: str, json_body: dict) -> dict:
+    """Return json_body with data_collection=deny merged into its provider
+    block when url is OpenRouter; other URLs are returned unchanged."""
+    if not url.startswith(OPENROUTER_PREFIX):
+        return json_body
+    return {**json_body, "provider": {**(json_body.get("provider") or {}), **OR_DATA_POLICY}}
+
+
 def post_with_retry(url: str, *, headers: dict, json_body: dict,
                     timeout: float, max_retries: int = 2) -> tuple:
     """POST url with JSON body; retry on network errors and 5xx.
 
+    OpenRouter requests always get data_collection=deny (enforce_or_policy).
     Returns (response_dict, None) on success, (None, error_str) on failure.
     """
+    json_body = enforce_or_policy(url, json_body)
     last_err = None
     for attempt in range(max_retries + 1):
         try:
